@@ -1,157 +1,221 @@
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="Order Reconciliation App", layout="wide")
+st.set_page_config(page_title="Reconciliation Dashboard", layout="wide")
 
-st.title("📊 Order & Settlement Reconciliation System")
+st.title("📊 Orders vs Settlements Reconciliation System")
+
 
 uploaded_file = st.file_uploader("Upload Excel File", type=["xlsx", "xls"])
 
 
-# ----------------------------
+# ---------------------------
 # SAFE COLUMN HANDLER
-# ----------------------------
-def safe_get(df, col, default=""):
-    """Return column if exists, else safe default"""
+# ---------------------------
+def safe_col(df, col):
     if col in df.columns:
         return df[col]
-    else:
-        return pd.Series([default] * len(df))
+    return pd.Series([None] * len(df))
 
 
-# ----------------------------
-# LOAD EXCEL FILE
-# ----------------------------
+# ---------------------------
+# LOAD EXCEL
+# ---------------------------
 def load_excel(file):
     xls = pd.ExcelFile(file)
-    sheets = xls.sheet_names
-
     data = {}
 
-    for sheet in sheets:
+    for sheet in xls.sheet_names:
         df = pd.read_excel(xls, sheet_name=sheet)
 
-        # Clean column names
         df.columns = [str(c).strip().lower() for c in df.columns]
 
-        # FIX: Ensure order_no always exists
+        # ensure order_no always exists
         if "order_no" not in df.columns:
-            if len(df.columns) > 0:
-                df["order_no"] = df.index.astype(str)
-            else:
-                df["order_no"] = "UNKNOWN"
+            df["order_no"] = df.index.astype(str)
 
         data[sheet.lower()] = df
 
     return data
 
 
-# ----------------------------
-# MAIN APP LOGIC
-# ----------------------------
+# ---------------------------
+# MAIN
+# ---------------------------
 if uploaded_file:
+
     data = load_excel(uploaded_file)
 
     st.success("File loaded successfully!")
 
-    # Show available sheets
-    st.sidebar.header("📁 Sheets Found")
-    sheet_names = list(data.keys())
-    selected_sheet = st.sidebar.selectbox("Select Sheet", sheet_names)
+    sheets = list(data.keys())
 
-    df = data[selected_sheet]
+    order_sheet = [s for s in sheets if "order" in s]
+    settlement_sheet = [s for s in sheets if "settle" in s]
 
-    st.subheader(f"📄 Viewing Sheet: {selected_sheet}")
-    st.dataframe(df, use_container_width=True)
+    # ---------------------------
+    # ORDERS
+    # ---------------------------
+    if order_sheet:
+        orders = data[order_sheet[0]].copy()
 
-    # ----------------------------
-    # IF ORDER SHEET EXISTS
-    # ----------------------------
-    order_sheets = [s for s in sheet_names if "order" in s]
+        orders["order_no"] = safe_col(orders, "order_no")
+        orders["amount"] = pd.to_numeric(safe_col(orders, "amount"), errors="coerce").fillna(0)
+        orders["status"] = safe_col(orders, "status").fillna("unknown")
 
-    if order_sheets:
-        st.subheader("🧾 Order Analysis")
+        st.subheader("🧾 Orders Data")
+        st.dataframe(orders, use_container_width=True)
 
-        order_df = data[order_sheets[0]].copy()
+        # ---------------------------
+        # PAYMENT CLASSIFICATION
+        # ---------------------------
+        paid_keywords = ["paid", "complete", "completed", "success", "done"]
 
-        # Safe columns
-        order_df["order_no"] = safe_get(order_df, "order_no", order_df.index.astype(str))
-        order_df["amount"] = safe_get(order_df, "amount", 0)
-        order_df["customer"] = safe_get(order_df, "customer", "Unknown")
-        order_df["status"] = safe_get(order_df, "status", "unknown")
-
-        st.write("### Cleaned Orders")
-        st.dataframe(order_df, use_container_width=True)
-
-        # ----------------------------
-        # PAID / UNPAID LOGIC
-        # ----------------------------
-        paid_keywords = ["paid", "complete", "completed", "success"]
-
-        order_df["is_paid"] = order_df["status"].astype(str).str.lower().apply(
+        orders["is_paid"] = orders["status"].astype(str).str.lower().apply(
             lambda x: any(k in x for k in paid_keywords)
         )
 
-        paid_orders = order_df[order_df["is_paid"] == True]
-        unpaid_orders = order_df[order_df["is_paid"] == False]
+        paid = orders[orders["is_paid"] == True]
+        unpaid = orders[orders["is_paid"] == False]
 
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
+
+        total_orders = len(orders)
+        total_revenue = orders["amount"].sum()
+        paid_revenue = paid["amount"].sum()
 
         with col1:
-            st.metric("✅ Paid Orders", len(paid_orders))
-            st.dataframe(paid_orders, use_container_width=True)
+            st.metric("📦 Total Orders", total_orders)
 
         with col2:
-            st.metric("❌ Unpaid Orders", len(unpaid_orders))
-            st.dataframe(unpaid_orders, use_container_width=True)
+            st.metric("💰 Total Revenue", f"{total_revenue:,.2f}")
 
-    # ----------------------------
-    # SETTLEMENT SHEET LOGIC
-    # ----------------------------
-    settlement_sheets = [s for s in sheet_names if "settle" in s]
+        with col3:
+            coverage = (len(paid) / total_orders * 100) if total_orders else 0
+            st.metric("📊 Payment Coverage %", f"{coverage:.2f}%")
 
-    if settlement_sheets:
-        st.subheader("💰 Settlement Analysis")
+        st.subheader("✅ Paid Orders")
+        st.dataframe(paid, use_container_width=True)
 
-        settle_df = data[settlement_sheets[0]].copy()
+        st.subheader("❌ Unpaid Orders")
+        st.dataframe(unpaid, use_container_width=True)
 
-        settle_df["order_no"] = safe_get(settle_df, "order_no", settle_df.index.astype(str))
-        settle_df["amount"] = safe_get(settle_df, "amount", 0)
+    else:
+        st.warning("No order sheet found (sheet name must contain 'order').")
 
-        st.write("### Settlement Data")
-        st.dataframe(settle_df, use_container_width=True)
+    # ---------------------------
+    # SETTLEMENTS
+    # ---------------------------
+    if settlement_sheet:
+        settlements = data[settlement_sheet[0]].copy()
 
-        total_settled = pd.to_numeric(settle_df["amount"], errors="coerce").fillna(0).sum()
+        settlements["order_no"] = safe_col(settlements, "order_no")
+        settlements["amount"] = pd.to_numeric(safe_col(settlements, "amount"), errors="coerce").fillna(0)
 
-        st.metric("💰 Total Settled Amount", f"{total_settled:,.2f}")
+        st.subheader("💰 Settlements Data")
+        st.dataframe(settlements, use_container_width=True)
 
-    # ----------------------------
-    # CROSS CHECK (ORDER vs SETTLEMENT)
-    # ----------------------------
-    if order_sheets and settlement_sheets:
+        total_settled = settlements["amount"].sum()
+
+        st.metric("💰 Total Settled", f"{total_settled:,.2f}")
+
+    else:
+        st.warning("No settlement sheet found (sheet name must contain 'settle').")
+
+    # ---------------------------
+    # RECONCILIATION ENGINE
+    # ---------------------------
+    if order_sheet and settlement_sheet:
+
         st.subheader("🔄 Reconciliation Report")
 
-        order_df = data[order_sheets[0]].copy()
-        settle_df = data[settlement_sheets[0]].copy()
+        orders = data[order_sheet[0]].copy()
+        settlements = data[settlement_sheet[0]].copy()
 
-        order_df["order_no"] = safe_get(order_df, "order_no", order_df.index.astype(str))
-        settle_df["order_no"] = safe_get(settle_df, "order_no", settle_df.index.astype(str))
+        orders["order_no"] = safe_col(orders, "order_no")
+        settlements["order_no"] = safe_col(settlements, "order_no")
 
-        merged = order_df.merge(
-            settle_df[["order_no"]],
+        # ---------------------------
+        # MATCH ORDERS TO SETTLEMENTS
+        # ---------------------------
+        merged = orders.merge(
+            settlements[["order_no"]],
             on="order_no",
             how="left",
             indicator=True
         )
 
-        merged["settled"] = merged["_merge"].apply(lambda x: x == "both")
+        merged["settled"] = merged["_merge"] == "both"
 
-        missing_settlements = merged[merged["settled"] == False]
+        missing = merged[merged["settled"] == False]
 
-        st.write("### ❌ Orders NOT in Settlement")
-        st.dataframe(missing_settlements, use_container_width=True)
+        # ---------------------------
+        # UNMATCHED SETTLEMENTS
+        # ---------------------------
+        unmatched_settlements = settlements.merge(
+            orders[["order_no"]],
+            on="order_no",
+            how="left",
+            indicator=True
+        )
 
-        st.metric("⚠️ Unsettled Orders", len(missing_settlements))
+        orphan_settlements = unmatched_settlements[unmatched_settlements["_merge"] == "left_only"]
+
+        # ---------------------------
+        # DUPLICATE CHECK
+        # ---------------------------
+        duplicate_orders = orders[orders.duplicated("order_no", keep=False)]
+
+        duplicate_settlements = settlements[settlements.duplicated("order_no", keep=False)]
+
+        # ---------------------------
+        # METRICS
+        # ---------------------------
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            st.metric("❌ Unpaid Orders", len(missing))
+
+        with col2:
+            st.metric("⚠️ Orphan Settlements", len(orphan_settlements))
+
+        with col3:
+            st.metric("🔁 Duplicate Orders", len(duplicate_orders))
+
+        with col4:
+            st.metric("🔁 Duplicate Settlements", len(duplicate_settlements))
+
+        # ---------------------------
+        # DETAILED TABLES
+        # ---------------------------
+        st.markdown("### ❌ Orders NOT SETTLED")
+        st.dataframe(missing, use_container_width=True)
+
+        st.markdown("### ⚠️ Orphan Settlements (No Matching Order)")
+        st.dataframe(orphan_settlements, use_container_width=True)
+
+        st.markdown("### 🔁 Duplicate Orders")
+        st.dataframe(duplicate_orders, use_container_width=True)
+
+        st.markdown("### 🔁 Duplicate Settlements")
+        st.dataframe(duplicate_settlements, use_container_width=True)
+
+        # ---------------------------
+        # FINAL SUMMARY
+        # ---------------------------
+        st.subheader("📊 Final Summary")
+
+        total_orders = len(orders)
+        total_settled = len(settlements)
+        matched = len(orders) - len(missing)
+
+        st.write(f"""
+        - Total Orders: **{total_orders}**
+        - Total Settlements: **{total_settled}**
+        - Matched Orders: **{matched}**
+        - Unmatched Orders: **{len(missing)}**
+        - Orphan Settlements: **{len(orphan_settlements)}**
+        """)
 
 else:
-    st.info("Upload an Excel file to begin analysis.")
+    st.info("Upload your Excel file to begin reconciliation.")
