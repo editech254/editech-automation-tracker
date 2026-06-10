@@ -2,281 +2,320 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import os
-import re
-import io
 from datetime import datetime
-from difflib import get_close_matches
+import io
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
+from reportlab.lib import colors
 
-# ---------------- Page Config ----------------
+# ---------------- PAGE CONFIG ----------------
 st.set_page_config(
-    page_title="EDITECH Automation Tracker",
+    page_title="EDITECH Kilimall Dashboard",
     layout="wide",
-    page_icon="🚀",
-    initial_sidebar_state="expanded",
+    page_icon="📊",
 )
 
-# ---------------- Styling ----------------
-st.markdown("""
-<style>
-    .main .block-container { padding-top: 2rem; max-width: 1400px; }
-    .stMetric { background: #f8f9fb; padding: 1rem; border-radius: 12px; border: 1px solid #eef0f4; }
-    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
-    .stTabs [data-baseweb="tab"] { border-radius: 8px 8px 0 0; padding: 10px 20px; }
-    div[data-testid="stFileUploader"] { background: #fafbfc; border-radius: 12px; padding: 1rem; }
-    h1, h2, h3 { color: #1f2937; }
-</style>
-""", unsafe_allow_html=True)
-
-# ---------------- DB ----------------
+# ---------------- DB SETUP ----------------
 DB_DIR = os.environ.get("DB_DIR", "/data")
-try:
-    os.makedirs(DB_DIR, exist_ok=True)
-except PermissionError:
-    DB_DIR = "./data"
-    os.makedirs(DB_DIR, exist_ok=True)
-DB_FILE = os.path.join(DB_DIR, "kilimall_automation.db")
+os.makedirs(DB_DIR, exist_ok=True)
+DB_FILE = os.path.join(DB_DIR, "editech_kilimall.db")
+
 
 def get_conn():
     return sqlite3.connect(DB_FILE, check_same_thread=False)
 
+
 def init_db():
-    with get_conn() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS master_orders (
-                order_no TEXT PRIMARY KEY,
-                shop_id TEXT, shop_name TEXT, product_name TEXT,
-                quantity INTEGER, amount REAL,
-                order_time TEXT, status TEXT, logged_via TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+    conn = get_conn()
+    c = conn.cursor()
+
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS master_orders (
+        order_no TEXT PRIMARY KEY,
+        shop_id TEXT,
+        shop_name TEXT,
+        product_name TEXT,
+        quantity INTEGER,
+        amount REAL,
+        cost REAL DEFAULT 0,
+        commission REAL DEFAULT 0,
+        profit REAL DEFAULT 0,
+        order_time TEXT,
+        status TEXT,
+        logged_via TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS settlement_records (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_no TEXT,
+        amount REAL,
+        settlement_date TEXT,
+        source_sheet TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
 init_db()
 
-# ---------------- Column Detection ----------------
-COLUMN_ALIASES = {
-    "order_no":    ["order_no", "order_number", "order_id", "orderno", "order", "ordernumber", "order#", "no"],
-    "shop_id":     ["shop_id", "shopid", "store_id", "seller_id"],
-    "shop_name":   ["shop_name", "shop", "store_name", "store", "seller", "seller_name"],
-    "product_name":["product_name", "product", "item", "item_name", "sku_name", "goods_name"],
-    "quantity":    ["quantity", "qty", "count", "units", "num"],
-    "amount":      ["amount", "total", "price", "total_amount", "total_price", "gmv", "revenue"],
-    "order_time":  ["order_time", "order_date", "date", "created_at", "created", "time", "placed_at"],
-    "status":      ["status", "order_status", "state"],
-}
-REQUIRED = ["order_no"]
+# ---------------- CONFIG ----------------
+COMMISSION_RATE = 0.12
+WHATSAPP_NUMBER = "254713522120"
 
-def normalize(col: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", str(col).lower())
+# ---------------- HELPERS ----------------
+def read_file(file):
+    if file.name.endswith(".csv"):
+        return pd.read_csv(file)
+    return pd.read_excel(file)
 
-def auto_map(df_cols):
-    """Return {target: source_col or None} using exact + fuzzy match."""
-    norm_to_orig = {normalize(c): c for c in df_cols}
-    norm_keys = list(norm_to_orig.keys())
-    mapping = {}
-    for target, aliases in COLUMN_ALIASES.items():
-        found = None
-        for a in aliases:
-            n = normalize(a)
-            if n in norm_to_orig:
-                found = norm_to_orig[n]; break
-        if not found:
-            for a in aliases:
-                close = get_close_matches(normalize(a), norm_keys, n=1, cutoff=0.8)
-                if close:
-                    found = norm_to_orig[close[0]]; break
-        mapping[target] = found
-    return mapping
 
-def clean_order(series: pd.Series) -> pd.Series:
-    return (series.astype(str)
-            .str.replace(r"\.0$", "", regex=True)
-            .str.replace(r"[^\w-]", "", regex=True)
-            .str.strip())
+def normalize(df):
+    df.columns = [c.lower().strip().replace(" ", "_") for c in df.columns]
+    return df
 
-def read_any(file) -> pd.DataFrame:
-    name = file.name.lower()
-    if name.endswith(".csv"):
-        return pd.read_csv(file, dtype=str, keep_default_na=False, na_values=[""])
-    return pd.read_excel(file, dtype=str)
 
-def apply_mapping(df: pd.DataFrame, mapping: dict) -> pd.DataFrame:
-    out = pd.DataFrame()
-    for target, source in mapping.items():
-        out[target] = df[source] if source and source in df.columns else None
-    return out
+def clean_order(series):
+    return series.astype(str).str.replace(r"[^\d]", "", regex=True)
 
-def upsert_batch(df: pd.DataFrame, logged_via: str, progress=None) -> tuple[int, int]:
-    rows, skipped = [], 0
-    for _, r in df.iterrows():
-        o = r.get("order_no")
-        if not o or pd.isna(o) or str(o).strip() == "":
-            skipped += 1; continue
+
+# ---------------- ORDER INGEST ----------------
+def save_orders(df, source):
+    conn = get_conn()
+    c = conn.cursor()
+
+    inserted, skipped = 0, 0
+
+    for _, row in df.iterrows():
+        order_no = row.get("order_no")
+        if not order_no:
+            skipped += 1
+            continue
+
+        amount = float(row.get("amount") or 0)
+        cost = float(row.get("cost") or 0)
+        commission = amount * COMMISSION_RATE
+        profit = amount - cost - commission
+
         try:
-            qty = int(float(r["quantity"])) if pd.notna(r.get("quantity")) and str(r.get("quantity")).strip() else 0
-        except (ValueError, TypeError): qty = 0
-        try:
-            amt = float(r["amount"]) if pd.notna(r.get("amount")) and str(r.get("amount")).strip() else 0.0
-        except (ValueError, TypeError): amt = 0.0
-        rows.append((str(o), str(r.get("shop_id") or ""), str(r.get("shop_name") or ""),
-                     str(r.get("product_name") or ""), qty, amt,
-                     str(r.get("order_time") or ""), str(r.get("status") or ""), logged_via))
+            c.execute("""
+            INSERT INTO master_orders
+            (order_no, shop_id, shop_name, product_name, quantity,
+             amount, cost, commission, profit, order_time, status, logged_via)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                str(order_no),
+                str(row.get("shop_id") or ""),
+                str(row.get("shop_name") or ""),
+                str(row.get("product_name") or ""),
+                int(row.get("quantity") or 0),
+                amount,
+                cost,
+                commission,
+                profit,
+                str(row.get("order_time") or ""),
+                str(row.get("status") or ""),
+                source
+            ))
+            inserted += 1
+        except sqlite3.IntegrityError:
+            skipped += 1
 
-    inserted = 0
-    with get_conn() as conn:
-        c = conn.cursor()
-        batch = 500
-        for i in range(0, len(rows), batch):
-            chunk = rows[i:i+batch]
-            before = conn.total_changes
-            c.executemany("""INSERT OR IGNORE INTO master_orders
-                (order_no, shop_id, shop_name, product_name, quantity, amount, order_time, status, logged_via)
-                VALUES (?,?,?,?,?,?,?,?,?)""", chunk)
-            inserted += conn.total_changes - before
-            if progress:
-                progress.progress(min(1.0, (i+batch)/max(1,len(rows))))
-    skipped += len(rows) - inserted
+    conn.commit()
+    conn.close()
     return inserted, skipped
 
-def fetch_all() -> pd.DataFrame:
-    with get_conn() as conn:
-        return pd.read_sql_query("SELECT * FROM master_orders ORDER BY created_at DESC", conn)
 
-# ---------------- Sidebar ----------------
-with st.sidebar:
-    st.markdown("### ⚙️ Settings")
-    source = st.selectbox("Source / Sheet type",
-        ["Kilimall Orders", "Shop Report", "Manual Upload"])
-    st.divider()
-    st.caption(f"📁 DB: `{DB_FILE}`")
-    st.caption(f"🕒 {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+# ---------------- SETTLEMENT INGEST ----------------
+def read_settlement(file):
+    xls = pd.ExcelFile(file)
+    frames = []
 
-# ---------------- Header ----------------
-st.title("📊 EDITECH DIGITAL")
-st.markdown("**Kilimall Automation Software** — Upload raw exports, get clean data.")
-st.divider()
+    for sheet in xls.sheet_names:
+        df = pd.read_excel(xls, sheet_name=sheet)
+        df = normalize(df)
 
-tab_upload, tab_data, tab_stats = st.tabs(["📤 Upload", "📋 Master Orders", "📈 Stats"])
+        order_col = next((c for c in df.columns if "order" in c), None)
+        amount_col = next((c for c in df.columns if "amount" in c or "paid" in c), None)
+        date_col = next((c for c in df.columns if "date" in c), None)
 
-# ---------------- Upload Tab ----------------
-with tab_upload:
-    files = st.file_uploader(
-        "Drop CSV or Excel files here",
-        type=["csv", "xlsx", "xls"],
-        accept_multiple_files=True,
-    )
+        temp = pd.DataFrame()
+        temp["order_no"] = df[order_col] if order_col else None
+        temp["amount"] = df[amount_col] if amount_col else 0
+        temp["settlement_date"] = df[date_col] if date_col else ""
+        temp["source_sheet"] = sheet
 
-    if files:
-        st.markdown("#### 🔍 Preview & Column Mapping")
-        previews = {}
-        mappings = {}
+        frames.append(temp)
 
-        for f in files:
-            with st.expander(f"📄 {f.name}", expanded=len(files) == 1):
-                try:
-                    f.seek(0)
-                    raw = read_any(f)
-                    previews[f.name] = raw
-                    st.caption(f"{len(raw):,} rows · {len(raw.columns)} columns")
-                    st.dataframe(raw.head(5), use_container_width=True, height=200)
+    return pd.concat(frames, ignore_index=True)
 
-                    auto = auto_map(raw.columns.tolist())
-                    st.markdown("**Column mapping** _(auto-detected, override if wrong)_")
-                    cols = st.columns(4)
-                    user_map = {}
-                    options = ["— None —"] + list(raw.columns)
-                    for i, (target, src) in enumerate(auto.items()):
-                        with cols[i % 4]:
-                            idx = options.index(src) if src in options else 0
-                            picked = st.selectbox(
-                                f"`{target}`" + (" *" if target in REQUIRED else ""),
-                                options, index=idx, key=f"{f.name}_{target}")
-                            user_map[target] = None if picked == "— None —" else picked
-                    mappings[f.name] = user_map
 
-                    missing = [t for t in REQUIRED if not user_map.get(t)]
-                    if missing:
-                        st.warning(f"⚠️ Missing required: {', '.join(missing)}")
-                except Exception as e:
-                    st.error(f"Failed to read: {e}")
+def save_settlement(df):
+    conn = get_conn()
+    c = conn.cursor()
 
-        st.divider()
-        if st.button("🚀 Process & Save", type="primary", use_container_width=True):
-            total_in, total_skip = 0, 0
-            progress = st.progress(0.0)
-            status = st.empty()
+    for _, row in df.iterrows():
+        if not row["order_no"]:
+            continue
 
-            for f in files:
-                if f.name not in previews: continue
-                user_map = mappings[f.name]
-                if not user_map.get("order_no"):
-                    st.error(f"{f.name}: skipped — no `order_no` mapped"); continue
+        c.execute("""
+        INSERT INTO settlement_records (order_no, amount, settlement_date, source_sheet)
+        VALUES (?, ?, ?, ?)
+        """, (
+            str(row["order_no"]),
+            float(row["amount"] or 0),
+            str(row["settlement_date"] or ""),
+            str(row["source_sheet"])
+        ))
 
-                status.info(f"Processing {f.name}…")
-                mapped = apply_mapping(previews[f.name], user_map)
-                mapped["order_no"] = clean_order(mapped["order_no"])
-                mapped = mapped[mapped["order_no"].astype(bool) & (mapped["order_no"] != "")]
+    conn.commit()
+    conn.close()
 
-                ins, skp = upsert_batch(mapped, logged_via=source, progress=progress)
-                total_in += ins; total_skip += skp
-                st.success(f"✅ **{f.name}** — inserted {ins:,} · skipped {skp:,}")
 
-            progress.progress(1.0); status.empty()
-            st.balloons()
-            st.info(f"**Done.** Total inserted: **{total_in:,}** · skipped (duplicates/invalid): **{total_skip:,}**")
+# ---------------- DATA FETCH ----------------
+def fetch_orders():
+    conn = get_conn()
+    df = pd.read_sql("SELECT * FROM master_orders", conn)
+    conn.close()
+    return df
 
-# ---------------- Data Tab ----------------
-with tab_data:
-    df = fetch_all()
-    top1, top2, top3 = st.columns([2, 1, 1])
-    top1.markdown(f"### Master Orders &nbsp; `{len(df):,} records`")
 
-    if not df.empty:
-        search = top2.text_input("🔎 Search", placeholder="order, shop, product…")
-        status_filter = top3.selectbox("Status", ["All"] + sorted(df["status"].dropna().unique().tolist()))
-        view = df.copy()
-        if search:
-            mask = view.apply(lambda r: r.astype(str).str.contains(search, case=False, na=False).any(), axis=1)
-            view = view[mask]
-        if status_filter != "All":
-            view = view[view["status"] == status_filter]
-        st.dataframe(view, use_container_width=True, height=520)
+def fetch_settlements():
+    conn = get_conn()
+    df = pd.read_sql("SELECT * FROM settlement_records", conn)
+    conn.close()
+    return df
 
-        d1, d2, _ = st.columns([1, 1, 4])
-        d1.download_button("⬇️ CSV", view.to_csv(index=False).encode("utf-8"),
-                           "master_orders.csv", "text/csv", use_container_width=True)
-        buf = io.BytesIO()
-        with pd.ExcelWriter(buf, engine="openpyxl") as w:
-            view.to_excel(w, index=False, sheet_name="Orders")
-        d2.download_button("⬇️ Excel", buf.getvalue(), "master_orders.xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True)
+
+# ---------------- RECONCILIATION ----------------
+def reconcile():
+    orders = fetch_orders()
+    settlements = fetch_settlements()
+
+    if orders.empty:
+        return pd.DataFrame()
+
+    orders["order_no"] = orders["order_no"].astype(str)
+
+    if not settlements.empty:
+        settlements["order_no"] = settlements["order_no"].astype(str)
+
+        merged = orders.merge(
+            settlements,
+            on="order_no",
+            how="left",
+            suffixes=("_order", "_settlement")
+        )
+
+        merged["reconciliation_status"] = merged["amount_settlement"].apply(
+            lambda x: "PAID" if pd.notna(x) and x > 0 else "MISSING"
+        )
     else:
-        st.info("No data yet. Upload some files in the Upload tab.")
+        merged = orders.copy()
+        merged["reconciliation_status"] = "MISSING"
 
-    with st.expander("⚠️ Danger zone"):
-        confirm = st.text_input("Type DELETE to confirm")
-        if st.button("Delete ALL records", disabled=(confirm != "DELETE")):
-            with get_conn() as conn: conn.execute("DELETE FROM master_orders")
-            st.warning("All records deleted. Refresh the page.")
+    return merged
 
-# ---------------- Stats Tab ----------------
-with tab_stats:
-    df = fetch_all()
+
+# ---------------- REPORTS ----------------
+def monthly_report(df):
+    df["order_time"] = pd.to_datetime(df["order_time"], errors="coerce")
+
+    return df.groupby(df["order_time"].dt.to_period("M")).agg({
+        "amount": "sum",
+        "commission": "sum",
+        "profit": "sum",
+        "order_no": "count"
+    }).reset_index().rename(columns={"order_no": "orders"})
+
+
+# ---------------- PDF ----------------
+def generate_pdf(data):
+    file = "report.pdf"
+    doc = SimpleDocTemplate(file)
+    table = Table(data)
+
+    style = TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), colors.grey),
+        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+        ("GRID", (0,0), (-1,-1), 0.5, colors.black),
+    ])
+
+    table.setStyle(style)
+    doc.build([table])
+    return file
+
+
+# ---------------- WHATSAPP ----------------
+def whatsapp(order_no, amount):
+    msg = f"Unpaid Order Alert: {order_no} Amount: {amount}"
+    return f"https://wa.me/{WHATSAPP_NUMBER}?text={msg}"
+
+
+# ---------------- UI ----------------
+st.title("📊 EDITECH Kilimall Accounting Dashboard")
+
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📤 Upload Orders",
+    "💰 Settlement",
+    "🔗 Reconciliation",
+    "📈 Analytics"
+])
+
+# ---------------- ORDERS ----------------
+with tab1:
+    file = st.file_uploader("Upload Orders", type=["csv", "xlsx"])
+
+    if file and st.button("Process Orders"):
+        df = normalize(read_file(file))
+        df["order_no"] = clean_order(df["order_no"])
+
+        ins, skip = save_orders(df, "upload")
+        st.success(f"Inserted: {ins}, Skipped: {skip}")
+
+# ---------------- SETTLEMENT ----------------
+with tab2:
+    file2 = st.file_uploader("Upload Settlement (Multi-sheet Excel)", type=["xlsx"])
+
+    if file2 and st.button("Process Settlement"):
+        df = read_settlement(file2)
+        save_settlement(df)
+        st.success(f"Loaded {len(df)} settlement records")
+
+# ---------------- RECONCILIATION ----------------
+with tab3:
+    df = reconcile()
+
     if df.empty:
-        st.info("No data yet. Upload some files first.")
+        st.info("No data yet")
     else:
-        df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0)
-        df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce").fillna(0)
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total Orders", f"{len(df):,}")
-        c2.metric("Total Quantity", f"{int(df['quantity'].sum()):,}")
-        c3.metric("Total Amount", f"KSh {df['amount'].sum():,.0f}")
-        c4.metric("Unique Shops", df["shop_name"].replace("", pd.NA).nunique())
-        st.divider()
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("##### Orders by Shop")
-            st.bar_chart(df[df["shop_name"] != ""].groupby("shop_name")["order_no"].count())
-        with col2:
-            st.markdown("##### Amount by Status")
-            st.bar_chart(df[df["status"] != ""].groupby("status")["amount"].sum())
+        st.dataframe(df, use_container_width=True)
+
+        st.subheader("❌ Unpaid Orders")
+        unpaid = df[df["reconciliation_status"] == "MISSING"]
+
+        for _, row in unpaid.iterrows():
+            st.markdown(f"[Send WhatsApp Alert]({whatsapp(row['order_no'], row['amount'])})")
+
+        if st.button("Generate PDF"):
+            pdf = generate_pdf(df.head(50).values.tolist())
+            with open(pdf, "rb") as f:
+                st.download_button("Download PDF", f, file_name="report.pdf")
+
+# ---------------- ANALYTICS ----------------
+with tab4:
+    df = fetch_orders()
+
+    if df.empty:
+        st.info("No data")
+    else:
+        st.metric("Orders", len(df))
+        st.metric("Revenue", f"{df['amount'].sum():,.2f}")
+        st.metric("Profit", f"{df['profit'].sum():,.2f}")
+
+        st.subheader("Monthly Report")
+        st.dataframe(monthly_report(df))
