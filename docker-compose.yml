@@ -1,0 +1,16 @@
+version: "3.9"
+
+services:
+  editech-tracker:
+    build: .
+    container_name: editech-tracker
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    environment:
+      - DB_DIR=/data
+    volumes:
+      - editech_data:/data
+
+volumes:
+  editech_data:
