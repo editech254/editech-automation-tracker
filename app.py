@@ -4,7 +4,6 @@ EDITECH DIGITAL — Kilimall Order Lifecycle, Reconciliation & BI Software
 A state-driven Streamlit application backed by SQLite for managing the
 full Kilimall order lifecycle: daily order capture, weekly settlement
 reconciliation, exception handling, and lifetime business intelligence.
-Features Code-Free UI Shop Management and Master Select-All Tables.
 """
 
 from __future__ import annotations
@@ -31,6 +30,17 @@ st.set_page_config(
 )
 
 # ---------------------------------------------------------------------------
+# Predefined Verified Shops List
+# ---------------------------------------------------------------------------
+SHOPS_LIST = [
+    "EDITECH DIGITAL",
+    "DACELY STORE",
+    "TANIAH",
+    "EDYTECH",
+    "GMD ALISON"
+]
+
+# ---------------------------------------------------------------------------
 # Database setup
 # ---------------------------------------------------------------------------
 DB_DIR = os.environ.get("DB_DIR", "/app/data")
@@ -53,30 +63,7 @@ def init_db() -> None:
     with get_conn() as conn:
         c = conn.cursor()
         
-        # 1. Dynamic table to store shops via the UI
-        c.execute(
-            """
-            CREATE TABLE IF NOT EXISTS managed_shops (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                shop_name TEXT UNIQUE NOT NULL,
-                aliases TEXT
-            )
-            """
-        )
-        
-        # Seed initial 5 shops if the table is freshly created
-        c.execute("SELECT COUNT(*) as cnt FROM managed_shops")
-        if c.fetchone()["cnt"] == 0:
-            initial_shops = [
-                ("EDITECH DIGITAL", "EDITECH, DIGITAL"),
-                ("DACELY STORE", "DACELY, STORE"),
-                ("TANIAH", "TANIAH"),
-                ("EDYTECH", "EDYTECH"),
-                ("GMD ALISON", "GMD, ALISON")
-            ]
-            c.executemany("INSERT INTO managed_shops (shop_name, aliases) VALUES (?, ?)", initial_shops)
-        
-        # 2. Verify active_daily_orders columns
+        # Verify active_daily_orders columns and handle migrations gracefully
         c.execute("PRAGMA table_info(active_daily_orders)")
         columns = [row["name"] for row in c.fetchall()]
         if not columns:
@@ -95,7 +82,7 @@ def init_db() -> None:
         elif "shop_name" not in columns:
             c.execute("ALTER TABLE active_daily_orders ADD COLUMN shop_name TEXT DEFAULT 'EDITECH DIGITAL'")
 
-        # 3. Verify unkeyed_buffer columns
+        # Verify unkeyed_buffer columns
         c.execute("PRAGMA table_info(unkeyed_buffer)")
         columns = [row["name"] for row in c.fetchall()]
         if not columns:
@@ -113,7 +100,7 @@ def init_db() -> None:
         elif "shop_name" not in columns:
             c.execute("ALTER TABLE unkeyed_buffer ADD COLUMN shop_name TEXT DEFAULT 'EDITECH DIGITAL'")
 
-        # 4. Verify historical_archive columns
+        # Verify historical_archive columns
         c.execute("PRAGMA table_info(historical_archive)")
         columns = [row["name"] for row in c.fetchall()]
         if not columns:
@@ -144,18 +131,13 @@ init_db()
 
 
 # ---------------------------------------------------------------------------
-# Dynamic Shop Fetchers & Data Normalization
+# Helpers & Data Normalization
 # ---------------------------------------------------------------------------
-def get_dynamic_shops() -> list[str]:
-    with get_conn() as conn:
-        rows = conn.execute("SELECT shop_name FROM managed_shops ORDER BY shop_name").fetchall()
-        return [r["shop_name"] for r in rows]
-
-
 _DIGIT_RE = re.compile(r"\D+")
 
 
 def clean_order_no(value) -> str:
+    """Strip all non-digit characters from Kilimall order identifiers."""
     if value is None:
         return ""
     s = str(value).strip()
@@ -169,30 +151,21 @@ def clean_order_series(series: pd.Series) -> pd.Series:
 
 
 def normalize_shop_name(val) -> str:
-    shops = get_dynamic_shops()
-    if not shops:
-        return "EDITECH DIGITAL"
-        
+    """Map incoming or parsed shop variants to the strict matching list identifiers."""
     if pd.isna(val) or not str(val).strip():
-        return shops[0]
-        
+        return "EDITECH DIGITAL"
     s = str(val).strip().upper()
-    
-    with get_conn() as conn:
-        rules = conn.execute("SELECT shop_name, aliases FROM managed_shops").fetchall()
-        
-    for r in rules:
-        name = r["shop_name"].upper()
-        if s == name or name in s or s in name:
-            return r["shop_name"]
-            
-        if r["aliases"]:
-            aliases = [a.strip().upper() for a in r["aliases"].split(",") if a.strip()]
-            for alias in aliases:
-                if alias in s:
-                    return r["shop_name"]
-                    
-    return shops[0]
+    if "EDITECH DIGITAL" in s or s == "EDITECH DIGITAL":
+        return "EDITECH DIGITAL"
+    if "DACELY" in s:
+        return "DACELY STORE"
+    if "TANIAH" in s:
+        return "TANIAH"
+    if "EDYTECH" in s:
+        return "EDYTECH"
+    if "GMD" in s or "ALISON" in s:
+        return "GMD ALISON"
+    return "EDITECH DIGITAL"
 
 
 def to_float(v) -> float:
@@ -208,6 +181,7 @@ def to_float(v) -> float:
 
 
 def find_column(df: pd.DataFrame, candidates: Iterable[str]) -> str | None:
+    """Case/space/punct insensitive column lookup."""
     norm = {re.sub(r"[\s_\(\)（）]+", "", c).lower(): c for c in df.columns.astype(str)}
     for cand in candidates:
         key = re.sub(r"[\s_\(\)（）]+", "", cand).lower()
@@ -241,12 +215,11 @@ with st.sidebar:
     st.header("🏪 Global Shop Control")
     st.caption("Select a shop view to filter statistics and look up localized ledgers across tables.")
     
-    live_shops = get_dynamic_shops()
     selected_shop = st.selectbox(
         "🎯 Filter Views by Shop Name",
-        options=["All Shops"] + live_shops,
+        options=["All Shops"] + SHOPS_LIST,
         index=0,
-        help="Filters the business scorecard and active ledger displays."
+        help="Filters the business scorecard and active ledger displays. Data imports maintain individual row attributions."
     )
 
 # ---------------------------------------------------------------------------
@@ -288,13 +261,12 @@ st.divider()
 # ---------------------------------------------------------------------------
 # Core Workspaces Tabs Layout Configuration
 # ---------------------------------------------------------------------------
-tab_ledger, tab_recon, tab_buffer, tab_archive, tab_settings = st.tabs(
+tab_ledger, tab_recon, tab_buffer, tab_archive = st.tabs(
     [
         "📝 Daily Ledger Entries",
         "🔄 Reconcile Settlement Report",
-        "⚠️ Un-keyed Exceptions Buffer ({})".format(len(buffer_df)),
-        "📚 Permanent Historical Archive ({})".format(len(archive_df)),
-        "⚙️ Storefront & Shop Settings"
+        f"⚠️ Un-keyed Exceptions Buffer ({len(buffer_df)})",
+        f"📚 Permanent Historical Archive ({len(archive_df)})",
     ]
 )
 
@@ -302,6 +274,7 @@ tab_ledger, tab_recon, tab_buffer, tab_archive, tab_settings = st.tabs(
 # MODULE B — Interactive Grid Ledger (Daily Logs Workspace)
 # ---------------------------------------------------------------------------
 def _snapshot_active() -> None:
+    """Saves the current state of the active database table to the session undo stack."""
     snap = read_table("SELECT date, order_no, shop_name, goods_name, qty, selling_price FROM active_daily_orders")
     stack = st.session_state.setdefault("undo_stack", [])
     stack.append(snap)
@@ -310,6 +283,7 @@ def _snapshot_active() -> None:
 
 
 def _replace_active(df: pd.DataFrame) -> int:
+    """Updates target rows matching operational views without cross-shop contamination."""
     clean = df.copy()
     if "order_no" not in clean.columns:
         return 0
@@ -348,129 +322,132 @@ def _replace_active(df: pd.DataFrame) -> int:
 
 with tab_ledger:
     st.subheader("📝 Active Dispatch Daily Ledger Logs")
-    
-    if not live_shops:
-        st.error("No registered stores found. Please define at least one storefront entry under the Settings tab.")
-    else:
-        with st.expander("📤 Bulk Load Daily Dispatched Records (Excel / CSV)", expanded=False):
-            # Formatted into 2 columns instead of 3 to accommodate the removal of the checkbox column
-            up_col1, up_col2 = st.columns([3, 1])
-            upload_file = up_col1.file_uploader("Upload orders file", type=["xlsx", "xls", "csv"], label_visibility="collapsed", key="orders_upload")
-            default_upload_shop = up_col2.selectbox("Fallback Shop Target Assignment", options=live_shops)
+    st.caption(
+        "Directly add or adjust entries below. The **Shop Name** field is restricted to verified storefront entities. "
+        "Tick the **🗑️** checkbox and hit **Delete Selected Orders** to clear entries instantly."
+    )
 
-            if upload_file and st.button("⬆️ Parse and Save Uploaded Sheet", type="primary"):
-                try:
-                    if upload_file.name.lower().endswith(".csv"):
-                        udf = pd.read_csv(upload_file, dtype=str)
-                    else:
-                        udf = pd.read_excel(upload_file, dtype=str)
-
-                    c_date = find_column(udf, ["date", "order_date", "created_at"])
-                    c_ord = find_column(udf, ["order_no", "order_sn", "order", "order number", "order_id"])
-                    c_shop = find_column(udf, ["shop_name", "shop", "store_name", "store"])
-                    c_goods = find_column(udf, ["goods_name", "product", "product_name", "item", "goods"])
-                    c_qty = find_column(udf, ["qty", "quantity", "qnty"])
-                    c_price = find_column(udf, ["selling_price", "price", "amount", "selling price"])
-
-                    if not c_ord:
-                        st.error("Operation aborted: Missing mandatory 'Order Number' mapping vector column.")
-                    else:
-                        norm = pd.DataFrame({
-                            "date": udf[c_date] if c_date else date.today().isoformat(),
-                            "order_no": clean_order_series(udf[c_ord]),
-                            "shop_name": udf[c_shop].map(normalize_shop_name) if c_shop else default_upload_shop,
-                            "goods_name": udf[c_goods] if c_goods else "",
-                            "qty": udf[c_qty].map(lambda v: int(to_float(v))) if c_qty else 1,
-                            "selling_price": udf[c_price].map(to_float) if c_price else 0.0,
-                        })
-                        norm = norm[norm["order_no"].astype(bool)]
-
-                        _snapshot_active()
-                        
-                        # Safe Mode implementation: Fetch current state and concat records seamlessly
-                        full_current = read_table("SELECT date, order_no, shop_name, goods_name, qty, selling_price FROM active_daily_orders")
-                        merged = pd.concat([full_current, norm], ignore_index=True)
-                            
-                        _replace_active(merged)
-                        st.toast("Successfully processed {} rows into tracking profiles.".format(len(norm)), icon="✅")
-                        st.rerun()
-                except Exception as exc:
-                    st.error("Bulk data processing execution failed: {}".format(exc))
-
-        # --- 🔳 MASTER SELECT ALL CHECKBOX FOR LEDGER ---
-        select_all_ledger = st.checkbox("☑️ Select All Rows on This Screen (Daily Ledger)", value=False, key="select_all_ledger_widget")
-
-        grid_seed = active_df.copy()
-        if grid_seed.empty:
-            grid_seed = pd.DataFrame([
-                {
-                    "date": date.today().isoformat(),
-                    "order_no": "",
-                    "shop_name": selected_shop if selected_shop != "All Shops" else live_shops[0],
-                    "goods_name": "",
-                    "qty": 1,
-                    "selling_price": 0.0
-                }
-            ])
-        else:
-            grid_seed = grid_seed[["date", "order_no", "shop_name", "goods_name", "qty", "selling_price"]]
-        
-        # Injects the master check box value as default state for the rows
-        grid_seed.insert(0, "_delete", select_all_ledger)
-
-        edited = st.data_editor(
-            grid_seed,
-            key="ledger_editor",
-            num_rows="dynamic",
-            use_container_width=True,
-            column_config={
-                "_delete": st.column_config.CheckboxColumn("🗑️", help="Select row elements for deletion commands"),
-                "date": st.column_config.TextColumn("Date Capture (YYYY-MM-DD)"),
-                "order_no": st.column_config.TextColumn("Order No. (Unique)", required=True),
-                "shop_name": st.column_config.SelectboxColumn("Shop Designation Column", options=live_shops, required=True),
-                "goods_name": st.column_config.TextColumn("Goods Nomenclature Name"),
-                "qty": st.column_config.NumberColumn("Quantity Handled", min_value=0, step=1),
-                "selling_price": st.column_config.NumberColumn("Calculated Selling Price (KSH)", format="%.2f"),
-            },
+    # --- Hybrid Upload Engine with Append-Only Design Execution Matrix ---
+    with st.expander("📤 Bulk Load Daily Dispatched Records (Excel / CSV)", expanded=False):
+        st.caption(
+            "If your file includes a shop name column, the engine processes it row-by-row. "
+            "If it does not exist, rows default to the fallback shop chosen below."
         )
+        up_col1, up_col2 = st.columns([3, 1])
+        upload_file = up_col1.file_uploader(
+            "Upload orders file", type=["xlsx", "xls", "csv"], label_visibility="collapsed", key="orders_upload"
+        )
+        default_upload_shop = up_col2.selectbox("Fallback Shop Target Assignment", options=SHOPS_LIST)
 
-        undo_stack = st.session_state.get("undo_stack", [])
-        col_a, col_b, col_c, _ = st.columns([1.5, 1.5, 1, 3])
-
-        if col_a.button("💾 Commit Ledger Updates", type="primary", use_container_width=True):
+        if upload_file and st.button("⬆️ Parse and Save Uploaded Sheet", type="primary"):
             try:
-                _snapshot_active()
-                keep = edited[~edited["_delete"].fillna(False)].drop(columns=["_delete"])
-                full_current = read_table("SELECT date, order_no, shop_name, goods_name, qty, selling_price FROM active_daily_orders")
-                if selected_shop == "All Shops":
-                    merged = keep
+                if upload_file.name.lower().endswith(".csv"):
+                    udf = pd.read_csv(upload_file, dtype=str)
                 else:
-                    other_shops = full_current[full_current["shop_name"] != selected_shop]
-                    merged = pd.concat([other_shops, keep], ignore_index=True)
+                    udf = pd.read_excel(upload_file, dtype=str)
+
+                c_date = find_column(udf, ["date", "order_date", "created_at"])
+                c_ord = find_column(udf, ["order_no", "order_sn", "order", "order number", "order_id"])
+                c_shop = find_column(udf, ["shop_name", "shop", "store_name", "store"])
+                c_goods = find_column(udf, ["goods_name", "product", "product_name", "item", "goods"])
+                c_qty = find_column(udf, ["qty", "quantity", "qnty"])
+                c_price = find_column(udf, ["selling_price", "price", "amount", "selling price"])
+
+                if not c_ord:
+                    st.error("Operation aborted: Missing mandatory 'Order Number' mapping vector column.")
+                else:
+                    norm = pd.DataFrame({
+                        "date": udf[c_date] if c_date else date.today().isoformat(),
+                        "order_no": clean_order_series(udf[c_ord]),
+                        "shop_name": udf[c_shop].map(normalize_shop_name) if c_shop else default_upload_shop,
+                        "goods_name": udf[c_goods] if c_goods else "",
+                        "qty": udf[c_qty].map(lambda v: int(to_float(v))) if c_qty else 1,
+                        "selling_price": udf[c_price].map(to_float) if c_price else 0.0,
+                    })
+                    norm = norm[norm["order_no"].astype(bool)]
+
+                    _snapshot_active()
                     
-                _replace_active(merged)
-                st.toast("Active Ledger alterations stored safely.", icon="✅")
-                st.rerun()
+                    full_current = read_table("SELECT date, order_no, shop_name, goods_name, qty, selling_price FROM active_daily_orders")
+                    merged = pd.concat([full_current, norm], ignore_index=True)
+                        
+                    _replace_active(merged)
+                    st.toast(f"Successfully appended {len(norm)} rows to tracking profiles.", icon="✅")
+                    st.rerun()
             except Exception as exc:
-                st.error("Failed to push grid corrections: {}".format(exc))
+                st.error(f"Bulk data processing execution failed: {exc}")
 
-        if col_b.button("🗑️ Delete Selected Orders", use_container_width=True):
-            to_del = edited[edited["_delete"].fillna(False)]
-            if to_del.empty:
-                st.toast("No ledger lines selected for deletion.", icon="ℹ️")
+    # --- Live Ledger Editor Grid Frame Interface ---
+    grid_seed = active_df.copy()
+    if grid_seed.empty:
+        grid_seed = pd.DataFrame([
+            {
+                "date": date.today().isoformat(),
+                "order_no": "",
+                "shop_name": selected_shop if selected_shop != "All Shops" else "EDITECH DIGITAL",
+                "goods_name": "",
+                "qty": 1,
+                "selling_price": 0.0
+            }
+        ])
+    else:
+        grid_seed = grid_seed[["date", "order_no", "shop_name", "goods_name", "qty", "selling_price"]]
+    grid_seed.insert(0, "_delete", False)
+
+    edited = st.data_editor(
+        grid_seed,
+        key="ledger_editor",
+        num_rows="dynamic",
+        use_container_width=True,
+        column_config={
+            "_delete": st.column_config.CheckboxColumn("🗑️", help="Select row elements for deletion commands", default=False),
+            "date": st.column_config.TextColumn("Date Capture (YYYY-MM-DD)"),
+            "order_no": st.column_config.TextColumn("Order No. (Unique)", required=True),
+            "shop_name": st.column_config.SelectboxColumn("Shop Designation Column", options=SHOPS_LIST, required=True),
+            "goods_name": st.column_config.TextColumn("Goods Nomenclature Name"),
+            "qty": st.column_config.NumberColumn("Quantity Handled", min_value=0, step=1),
+            "selling_price": st.column_config.NumberColumn("Calculated Selling Price (KSH)", format="%.2f"),
+        },
+    )
+
+    undo_stack = st.session_state.get("undo_stack", [])
+    col_a, col_b, col_c, _ = st.columns([1.5, 1.5, 1, 3])
+
+    if col_a.button("💾 Commit Ledger Updates", type="primary", use_container_width=True):
+        try:
+            _snapshot_active()
+            keep = edited[~edited["_delete"].fillna(False)].drop(columns=["_delete"])
+            
+            full_current = read_table("SELECT date, order_no, shop_name, goods_name, qty, selling_price FROM active_daily_orders")
+            if selected_shop == "All Shops":
+                merged = keep
             else:
-                _snapshot_active()
-                ids = [clean_order_no(x) for x in to_del["order_no"].tolist() if clean_order_no(x)]
-                with get_conn() as conn:
-                    conn.executemany("DELETE FROM active_daily_orders WHERE order_no = ?", [(i,) for i in ids])
-                st.toast("Purged {} target lines from operational view logs.".format(len(ids)), icon="🗑️")
-                st.rerun()
-
-        if col_c.button("↩️ Undo ({})".format(len(undo_stack)), use_container_width=True, disabled=not undo_stack):
-            prev = st.session_state["undo_stack"].pop()
-            _replace_active(prev)
-            st.toast("Reverted state to last saved database footprint frame.", icon="↩️")
+                other_shops = full_current[full_current["shop_name"] != selected_shop]
+                merged = pd.concat([other_shops, keep], ignore_index=True)
+                
+            _replace_active(merged)
+            st.toast("Active Ledger alterations stored safely.", icon="✅")
             st.rerun()
+        except Exception as exc:
+            st.error(f"Failed to push grid corrections: {exc}")
+
+    if col_b.button("🗑️ Delete Selected Orders", use_container_width=True):
+        to_del = edited[edited["_delete"].fillna(False)]
+        if to_del.empty:
+            st.toast("No ledger lines selected for deletion.", icon="ℹ️")
+        else:
+            _snapshot_active()
+            ids = [clean_order_no(x) for x in to_del["order_no"].tolist() if clean_order_no(x)]
+            with get_conn() as conn:
+                conn.executemany("DELETE FROM active_daily_orders WHERE order_no = ?", [(i,) for i in ids])
+            st.toast(f"Purged {len(ids)} target lines from operational view logs.", icon="🗑️")
+            st.rerun()
+
+    if col_c.button(f"↩️ Undo ({len(undo_stack)})", use_container_width=True, disabled=not undo_stack):
+        prev = st.session_state["undo_stack"].pop()
+        _replace_active(prev)
+        st.toast("Reverted state to last saved database footprint frame.", icon="↩️")
+        st.rerun()
 
 # ---------------------------------------------------------------------------
 # MODULE C — Multi-sheet Reconciliation Engine
@@ -479,6 +456,7 @@ def run_reconciliation(file, settlement_period: str) -> dict:
     sheets = pd.read_excel(file, sheet_name=None, dtype=str)
     warnings: list[str] = []
 
+    # --- bill details tab processing ---
     bill_name = find_sheet(sheets, ["bill details", "billdetails", "bill_details", "bill detail"])
     if not bill_name:
         raise ValueError("Critical structural component missing: 'bill details' sheet wasn't discovered.")
@@ -507,6 +485,7 @@ def run_reconciliation(file, settlement_period: str) -> dict:
         {"complete_amount": "sum", "commission": "sum", "settlement_base": "sum", "shop_name": "first"}
     )
 
+    # --- ds processing fee sub-sheet data capture ---
     ds_name = find_sheet(sheets, ["ds processing fee", "dsprocessingfee", "ds_processing_fee"])
     if ds_name:
         ds = sheets[ds_name]
@@ -516,10 +495,12 @@ def run_reconciliation(file, settlement_period: str) -> dict:
             ds_df = pd.DataFrame({"order_no": clean_order_series(ds[c_o]), "ds_processing_fee": ds[c_a].map(to_float)})
             ds_df = ds_df[ds_df["order_no"].astype(bool)].groupby("order_no", as_index=False).sum()
         else:
+            warnings.append("Sticker notice: 'ds processing fee' table columns mismatch formatting metrics.")
             ds_df = pd.DataFrame(columns=["order_no", "ds_processing_fee"])
     else:
         ds_df = pd.DataFrame(columns=["order_no", "ds_processing_fee"])
 
+    # --- fine deductions processing ---
     fine_name = find_sheet(sheets, ["fine", "fines"])
     if fine_name:
         fn = sheets[fine_name]
@@ -529,11 +510,13 @@ def run_reconciliation(file, settlement_period: str) -> dict:
             fine_df = pd.DataFrame({"order_no": clean_order_series(fn[c_o]), "fines": fn[c_a].map(to_float)})
             fine_df = fine_df[fine_df["order_no"].astype(bool)].groupby("order_no", as_index=False).sum()
         else:
+            warnings.append("Sticker notice: 'fine' deduction tracking layout contains structural mutations.")
             fine_df = pd.DataFrame(columns=["order_no", "fines"])
     else:
         fine_df = pd.DataFrame(columns=["order_no", "fines"])
 
-    od_name = find_sheet(sheets, ["Other Deductions", "otherdeductions", "other_ded_columns", "other_deductions"])
+    # --- miscellaneous other deductions collection ---
+    od_name = find_sheet(sheets, ["Other Deductions", "otherdeductions", "other_ded_columns", "other_ded_conditions", "other_deductions"])
     if od_name:
         od = sheets[od_name]
         c_o = find_column(od, ["Order SN", "order_sn", "order_no", "order"])
@@ -542,16 +525,19 @@ def run_reconciliation(file, settlement_period: str) -> dict:
             od_df = pd.DataFrame({"order_no": clean_order_series(od[c_o]), "other_deductions": od[c_a].map(to_float)})
             od_df = od_df[od_df["order_no"].astype(bool)].groupby("order_no", as_index=False).sum()
         else:
+            warnings.append("Sticker notice: 'Other Deductions' table configuration omitted from tracking calculations.")
             od_df = pd.DataFrame(columns=["order_no", "other_deductions"])
     else:
         od_df = pd.DataFrame(columns=["order_no", "other_deductions"])
 
+    # --- Compiled Matrices Left Joining Pipeline ---
     master = bill_df.merge(ds_df, on="order_no", how="left")
     master = master.merge(fine_df, on="order_no", how="left")
     master = master.merge(od_df, on="order_no", how="left")
     for col in ["ds_processing_fee", "fines", "other_deductions", "commission"]:
         master[col] = master[col].fillna(0.0)
 
+    # --- Match execution loops against active inventory vectors ---
     active = read_table("SELECT * FROM active_daily_orders")
     active_map = {row["order_no"]: row for _, row in active.iterrows()}
 
@@ -620,52 +606,76 @@ def run_reconciliation(file, settlement_period: str) -> dict:
 
 with tab_recon:
     st.subheader("🔄 Weekly Multi-Sheet Matching Engine")
+    st.caption(
+        "Ingest Kilimall's settlement spreadsheets here. The system splits payouts by shop automatically, "
+        "calculates true fee parameters, and archives reconciled logs dynamically."
+    )
+
     col1, col2 = st.columns([2, 1])
-    period = col1.text_input("Settlement Period Label Reference", value="Week of {}".format(date.today().isoformat()))
+    period = col1.text_input(
+        "Settlement Period Label Reference",
+        value=f"Week of {date.today().isoformat()}",
+    )
     settlement_file = col2.file_uploader("Drop settlement sheet document here", type=["xlsx", "xls"], label_visibility="collapsed")
 
     if settlement_file and st.button("🚀 Run System Settlement Reconciliation", type="primary"):
         with st.spinner("Executing line-by-line validation scripts..."):
             try:
                 result = run_reconciliation(settlement_file, period)
-                st.success("Processed {} items -> ✅ {} matched, ⚠️ {} exception items.".format(result['total'], result['matched'], result['unkeyed']))
+                for w in result["warnings"]:
+                    st.toast(w, icon="⚠️")
+                st.success(
+                    f"Processed {result['total']} settled items -> "
+                    f"✅ {result['matched']} matched & saved to archive storage, ⚠️ {result['unkeyed']} anomalies sent to staging exception views."
+                )
                 st.rerun()
+            except ValueError as exc:
+                st.error(f"Reconciliation halted safely: {exc}")
             except Exception as exc:
-                st.error("Reconciliation halted safely: {}".format(exc))
+                st.error(f"Unexpected operational failure encountered: {exc}")
 
 # ---------------------------------------------------------------------------
 # MODULE D — Un-keyed Buffer Exception Handler & Deletion Control
 # ---------------------------------------------------------------------------
 with tab_buffer:
     st.subheader("⚠️ Missing Log Staging Exception Buffer Workspace")
+    st.caption(
+        "Orders tracked below appeared in Kilimall's statements but were missing from your ledger logs. "
+        "Key them into the **Daily Ledger Workspace**, then press **Rematch Staged Rows** to resolve exceptions. "
+        "You can also check rows and click **Delete Selected Exceptions** to purge data anomalies immediately."
+    )
+
     if buffer_df.empty:
         st.success("🎉 Exception staging containers are clear for this selection view context range.")
     else:
-        # --- 🔳 MASTER SELECT ALL CHECKBOX FOR EXCEPTIONS ---
-        select_all_buffer = st.checkbox("☑️ Select All Rows on This Screen (Exceptions)", value=False, key="select_all_buffer_widget")
-
         buffer_seed = buffer_df.copy()
-        buffer_seed.insert(0, "🗑️ Select", select_all_buffer)
+        buffer_seed.insert(0, "🗑️ Select", False)
         
         edited_buffer = st.data_editor(
-            buffer_seed, key="buffer_deletion_editor", use_container_width=True, hide_index=True,
+            buffer_seed,
+            key="buffer_deletion_editor",
+            use_container_width=True,
+            hide_index=True,
             column_config={
-                "🗑️ Select": st.column_config.CheckboxColumn("🗑️"),
+                "🗑️ Select": st.column_config.CheckboxColumn("🗑️", help="Mark target anomalies for absolute removal"),
                 "order_no": st.column_config.TextColumn("Order No.", disabled=True),
                 "shop_name": st.column_config.TextColumn("Shop Origin Category", disabled=True),
                 "settlement_period": st.column_config.TextColumn("Statement ID Label", disabled=True),
-                "complete_amount": st.column_config.NumberColumn("Gross Value", format="%.2f", disabled=True),
+                "complete_amount": st.column_config.NumberColumn("Dispatched Gross Value Received", format="%.2f", disabled=True),
+                "detected_at": st.column_config.TextColumn("Exception Detection Timestamp", disabled=True)
             }
         )
 
-        b_col1, b_col2, b_col3 = st.columns([1.5, 1.5, 3])
+        b_col1, b_col2, _ = st.columns([1.5, 1.5, 5])
         
         if b_col1.button("♻️ Rematch Staged Rows", type="primary", use_container_width=True):
             rematched = 0
             with get_conn() as conn:
                 buf_rows = conn.execute("SELECT * FROM unkeyed_buffer").fetchall()
                 for b in buf_rows:
-                    a = conn.execute("SELECT * FROM active_daily_orders WHERE order_no = ?", (b["order_no"],)).fetchone()
+                    a = conn.execute(
+                        "SELECT * FROM active_daily_orders WHERE order_no = ?", (b["order_no"],)
+                    ).fetchone()
                     if not a:
                         continue
                     complete_amount = float(b["complete_amount"] or 0)
@@ -676,31 +686,76 @@ with tab_buffer:
                              complete_amount, commission, ds_processing_fee, fines, other_deductions, net_payout)
                         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                         """,
-                        (b["order_no"], normalize_shop_name(a["shop_name"]), a["goods_name"], int(a["qty"] or 0),
-                         float(a["selling_price"] or 0), b["settlement_period"], complete_amount, 0.0, 0.0, 0.0, 0.0, complete_amount),
+                        (
+                            b["order_no"],
+                            normalize_shop_name(a["shop_name"]),
+                            a["goods_name"],
+                            int(a["qty"] or 0),
+                            float(a["selling_price"] or 0),
+                            b["settlement_period"],
+                            complete_amount,
+                            0.0, 0.0, 0.0, 0.0,
+                            complete_amount,
+                        ),
                     )
                     conn.execute("DELETE FROM active_daily_orders WHERE order_no = ?", (b["order_no"],))
                     conn.execute("DELETE FROM unkeyed_buffer WHERE order_no = ?", (b["order_no"],))
                     rematched += 1
-            st.toast("Re-mapped {} elements to long-term storage.".format(rematched), icon="✅")
+            st.toast(f"Re-mapped {rematched} elements to long-term storage successfully.", icon="♻️")
             st.rerun()
 
         if b_col2.button("🗑️ Delete Selected Exceptions", use_container_width=True):
-            buffer_to_del = edited_buffer[edited_buffer["🗑️ Select"].fillna(False)]
-            if not buffer_to_del.empty:
-                del_ids = buffer_to_del["order_no"].tolist()
+            to_del_buf = edited_buffer[edited_buffer["🗑️ Select"].fillna(False)]
+            if to_del_buf.empty:
+                st.toast("No staged exceptions selected for erasure.", icon="ℹ️")
+            else:
+                buf_ids = [str(x) for x in to_del_buf["order_no"].tolist() if x]
                 with get_conn() as conn:
-                    conn.executemany("DELETE FROM unkeyed_buffer WHERE order_no = ?", [(i,) for i in del_ids])
+                    conn.executemany("DELETE FROM unkeyed_buffer WHERE order_no = ?", [(bi,) for bi in buf_ids])
+                st.toast(f"Purged {len(buf_ids)} data anomalies from the staging buffer.", icon="🗑️")
                 st.rerun()
 
 # ---------------------------------------------------------------------------
-# MODULE E — Permanent Lifetime Archive View & Deletion Control
+# MODULE E — Permanent Historical Archive & BI Report Exporter
 # ---------------------------------------------------------------------------
 with tab_archive:
-    st.subheader("📚 Reconciled Lifetime Database Archive Ledger")
+    st.subheader("📚 Reconciled Sales Archive & Ledger Logs")
+    st.caption("Review permanently matched sales, calculated fee parameters, and true net payouts.")
+
     if archive_df.empty:
-        st.info("No compiled settlement matrices recorded inside history metrics yet.")
+        st.info("No matching historical records found for the selected storefront scope.")
     else:
-        # --- 🔳 MASTER SELECT ALL CHECKBOX FOR ARCHIVE ---
-        select_all_archive = st.checkbox("☑️ Select All Rows on This Screen (Archive)", value=False, key="select_all_archive_widget")
-        # Python script code continues for tab context layout structure configuration...
+        # Format columns for crisp grid representation
+        display_archive = archive_df.copy()
+        
+        st.dataframe(
+            display_archive.drop(columns=["archived_at"], errors="ignore"),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "order_no": st.column_config.TextColumn("Order ID"),
+                "shop_name": st.column_config.TextColumn("Store Entity Name"),
+                "goods_name": st.column_config.TextColumn("Product Nomenclature"),
+                "qty": st.column_config.NumberColumn("Units"),
+                "selling_price": st.column_config.NumberColumn("Original Price", format="%.2f"),
+                "settlement_period": st.column_config.TextColumn("Settlement Window"),
+                "complete_amount": st.column_config.NumberColumn("Gross Received", format="%.2f"),
+                "commission": st.column_config.NumberColumn("Kilimall Comm.", format="%.2f"),
+                "ds_processing_fee": st.column_config.NumberColumn("DS Processing", format="%.2f"),
+                "fines": st.column_config.NumberColumn("Fines Accrued", format="%.2f"),
+                "other_deductions": st.column_config.NumberColumn("Misc. Deductions", format="%.2f"),
+                "net_payout": st.column_config.NumberColumn("True Net Revenue", format="%.2f"),
+            }
+        )
+
+        # In-Memory Binary File Exporter Block
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            display_archive.to_excel(writer, index=False, sheet_name='Reconciled Financial Archive')
+        
+        st.download_button(
+            label="📥 Download Cleaned Financial Report (Excel)",
+            data=buffer.getvalue(),
+            file_name=f"Reconciled_Archive_{selected_shop.replace(' ', '_')}_{date.today().isoformat()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
