@@ -690,7 +690,7 @@ with tab_recon:
                 st.error(f"Unexpected operational failure encountered: {exc}")
 
 # ---------------------------------------------------------------------------
-# MODULE D — Un-keyed Buffer Exception Workspace (FIXED WITH DELETE & SELECT ALL)
+# MODULE D — Un-keyed Buffer Exception Workspace
 # ---------------------------------------------------------------------------
 with tab_buffer:
     st.subheader("⚠️ Missing Log Staging Exception Buffer Workspace")
@@ -760,7 +760,6 @@ with tab_buffer:
             st.toast(f"Re-mapped {rematched} elements to long-term storage successfully.", icon="✅")
             st.rerun()
 
-        # Fixed: Functional Delete Engine connected right to SQLite for the Exception Buffer Workspace
         if b_col2.button("🗑️ Delete Selected Exceptions", use_container_width=True):
             to_del_buf = edited_buffer[edited_buffer["🗑️ Select"].fillna(False)]
             if to_del_buf.empty:
@@ -773,31 +772,57 @@ with tab_buffer:
                 st.rerun()
 
 # ---------------------------------------------------------------------------
-# MODULE E — Permanent Historical Archive Panel
+# MODULE E — Permanent Historical Archive Panel (FIXED WITH DELETE & SELECT ALL)
 # ---------------------------------------------------------------------------
 with tab_archive:
     st.subheader("📚 Permanent Ledger Verification Archive Matrix")
-    st.caption("Review permanently matched historical transactions, accurate payouts, and structured deductions.")
+    st.caption(
+        "Review permanently matched historical transactions, accurate payouts, and structured deductions. "
+        "Tick specific records or use **Select All** to permanently force delete data fragments from long-term memory logs."
+    )
     
     if archive_df.empty:
         st.info("No matching finalized archive data rows discovered within this selection profile context.")
     else:
-        st.dataframe(
-            archive_df.drop(columns=["archived_at"], errors="ignore"),
+        archive_seed = archive_df.copy()
+        
+        # New: Select All Checkbox for Archive Table
+        select_all_archive = st.checkbox("Select All Archive Rows For Absolute Purging", value=False, key="select_all_archive_checkbox")
+        archive_seed.insert(0, "🗑️ Purge", select_all_archive)
+        
+        # Converted into a data_editor to facilitate row check selections cleanly
+        edited_archive = st.data_editor(
+            archive_seed.drop(columns=["archived_at"], errors="ignore"),
+            key="archive_purging_editor",
             use_container_width=True,
             hide_index=True,
             column_config={
-                "order_no": st.column_config.TextColumn("Order Number"),
-                "shop_name": st.column_config.TextColumn("Store Identification"),
-                "goods_name": st.column_config.TextColumn("Product SKU Nomenclature"),
-                "qty": st.column_config.NumberColumn("Quantity"),
-                "selling_price": st.column_config.NumberColumn("Sales Book Price", format="%.2f"),
-                "settlement_period": st.column_config.TextColumn("Settlement Window"),
-                "complete_amount": st.column_config.NumberColumn("Gross Dispatched", format="%.2f"),
-                "commission": st.column_config.NumberColumn("Platform Commissions", format="%.2f"),
-                "ds_processing_fee": st.column_config.NumberColumn("DS Fulfillment Cost", format="%.2f"),
-                "fines": st.column_config.NumberColumn("Penalties Applied", format="%.2f"),
-                "other_deductions": st.column_config.NumberColumn("Misc Deductions", format="%.2f"),
-                "net_payout": st.column_config.NumberColumn("Net Payout Disbursed", format="%.2f")
+                "🗑️ Purge": st.column_config.CheckboxColumn("🗑️", help="Select verified record elements for permanent hard deletion"),
+                "order_no": st.column_config.TextColumn("Order Number", disabled=True),
+                "shop_name": st.column_config.TextColumn("Store Identification", disabled=True),
+                "goods_name": st.column_config.TextColumn("Product SKU Nomenclature", disabled=True),
+                "qty": st.column_config.NumberColumn("Quantity", disabled=True),
+                "selling_price": st.column_config.NumberColumn("Sales Book Price", format="%.2f", disabled=True),
+                "settlement_period": st.column_config.TextColumn("Settlement Window", disabled=True),
+                "complete_amount": st.column_config.NumberColumn("Gross Dispatched", format="%.2f", disabled=True),
+                "commission": st.column_config.NumberColumn("Platform Commissions", format="%.2f", disabled=True),
+                "ds_processing_fee": st.column_config.NumberColumn("DS Fulfillment Cost", format="%.2f", disabled=True),
+                "fines": st.column_config.NumberColumn("Penalties Applied", format="%.2f", disabled=True),
+                "other_deductions": st.column_config.NumberColumn("Misc Deductions", format="%.2f", disabled=True),
+                "net_payout": st.column_config.NumberColumn("Net Payout Disbursed", format="%.2f", disabled=True)
             }
         )
+        
+        arch_btn_col, _ = st.columns([2, 4])
+        
+        # New: Hard-Deletion execution routine connected directly to SQLite
+        if arch_btn_col.button("🗑️ Force Delete Selected From Archive", use_container_width=True):
+            to_purge = edited_archive[edited_archive["🗑️ Purge"].fillna(False)]
+            if to_purge.empty:
+                st.toast("No archival records checked for destruction operations.", icon="ℹ️")
+            else:
+                purge_ids = [str(x) for x in to_purge["order_no"].tolist() if x]
+                with get_conn() as conn:
+                    conn.executemany("DELETE FROM historical_archive WHERE order_no = ?", [(pi,) for pi in purge_ids])
+                st.toast(f"Permanently wiped {len(purge_ids)} lines from database historical records storage.", icon="🗑️")
+                st.rerun()
