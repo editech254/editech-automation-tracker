@@ -30,17 +30,6 @@ st.set_page_config(
 )
 
 # ---------------------------------------------------------------------------
-# Predefined Verified Shops List
-# ---------------------------------------------------------------------------
-SHOPS_LIST = [
-    "EDITECH DIGITAL",
-    "DACELY STORE",
-    "TANIAH",
-    "EDYTECH",
-    "GMD ALISON"
-]
-
-# ---------------------------------------------------------------------------
 # Database setup
 # ---------------------------------------------------------------------------
 DB_DIR = os.environ.get("DB_DIR", "/app/data")
@@ -126,8 +115,36 @@ def init_db() -> None:
         elif "shop_name" not in columns:
             c.execute("ALTER TABLE historical_archive ADD COLUMN shop_name TEXT DEFAULT 'EDITECH DIGITAL'")
 
+        # Setup Dynamic Shop Configuration & Mapping Tables
+        c.execute("CREATE TABLE IF NOT EXISTS registered_shops (shop_name TEXT PRIMARY KEY)")
+        c.execute("CREATE TABLE IF NOT EXISTS shop_keywords (keyword TEXT PRIMARY KEY, shop_name TEXT)")
+        
+        # Seed core fallback defaults if tables are fresh
+        c.execute("SELECT COUNT(*) FROM registered_shops")
+        if c.fetchone()[0] == 0:
+            for shop in ["EDITECH DIGITAL", "DACELY STORE", "TANIAH", "EDYTECH", "GMD ALISON"]:
+                c.execute("INSERT OR IGNORE INTO registered_shops (shop_name) VALUES (?)", (shop,))
+                
+        c.execute("SELECT COUNT(*) FROM shop_keywords")
+        if c.fetchone()[0] == 0:
+            defaults = [
+                ("EDITECH DIGITAL", "EDITECH DIGITAL"),
+                ("DACELY", "DACELY STORE"),
+                ("TANIAH", "TANIAH"),
+                ("EDYTECH", "EDYTECH"),
+                ("GMD", "GMD ALISON"),
+                ("ALISON", "GMD ALISON")
+            ]
+            c.executemany("INSERT OR IGNORE INTO shop_keywords (keyword, shop_name) VALUES (?, ?)", defaults)
+
 
 init_db()
+
+
+def load_shops_list() -> list[str]:
+    """Dynamically load registered shops from database."""
+    with get_conn() as conn:
+        return [row["shop_name"] for row in conn.execute("SELECT shop_name FROM registered_shops ORDER BY shop_name").fetchall()]
 
 
 # ---------------------------------------------------------------------------
@@ -151,20 +168,18 @@ def clean_order_series(series: pd.Series) -> pd.Series:
 
 
 def normalize_shop_name(val) -> str:
-    """Map incoming or parsed shop variants to the strict matching list identifiers."""
+    """Map incoming or parsed shop variants via user-defined keyword mappings with safe fallback."""
     if pd.isna(val) or not str(val).strip():
         return "EDITECH DIGITAL"
     s = str(val).strip().upper()
-    if "EDITECH DIGITAL" in s or s == "EDITECH DIGITAL":
-        return "EDITECH DIGITAL"
-    if "DACELY" in s:
-        return "DACELY STORE"
-    if "TANIAH" in s:
-        return "TANIAH"
-    if "EDYTECH" in s:
-        return "EDYTECH"
-    if "GMD" in s or "ALISON" in s:
-        return "GMD ALISON"
+    
+    with get_conn() as conn:
+        keywords = {row["keyword"].upper(): row["shop_name"] for row in conn.execute("SELECT keyword, shop_name FROM shop_keywords").fetchall()}
+        
+    for kw, shop in keywords.items():
+        if kw in s:
+            return shop
+            
     return "EDITECH DIGITAL"
 
 
@@ -209,11 +224,14 @@ def ksh(x: float) -> str:
 
 
 # ---------------------------------------------------------------------------
-# SIDEBAR — Global Shop Filtering Control
+# SIDEBAR — Global Shop Filtering & Interactive Config Controls
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.header("🏪 Global Shop Control")
     st.caption("Select a shop view to filter statistics and look up localized ledgers across tables.")
+    
+    # Core dynamic store layout configuration sync
+    SHOPS_LIST = load_shops_list()
     
     selected_shop = st.selectbox(
         "🎯 Filter Views by Shop Name",
@@ -221,6 +239,58 @@ with st.sidebar:
         index=0,
         help="Filters the business scorecard and active ledger displays. Data imports maintain individual row attributions."
     )
+    
+    st.divider()
+    
+    # --- Dynamic Custom Shop Management Dashboard Suite ---
+    with st.expander("⚙️ Manage Shops & Keywords", expanded=False):
+        st.subheader("➕ Register New Store Front")
+        new_shop = st.text_input("New Shop Entity Name", key="new_shop_name_input").strip()
+        if st.button("Save New Shop", type="secondary", use_container_width=True):
+            if new_shop:
+                with get_conn() as conn:
+                    try:
+                        conn.execute("INSERT INTO registered_shops (shop_name) VALUES (?)", (new_shop,))
+                        st.toast(f"Store front '{new_shop}' initialized successfully!", icon="✅")
+                        st.rerun()
+                    except sqlite3.IntegrityError:
+                        st.error("This shop entity name is already registered.")
+            else:
+                st.error("Shop name entry cannot be empty.")
+                
+        st.subheader("📝 Rename Registered Shop")
+        if SHOPS_LIST:
+            shop_to_rename = st.selectbox("Select Target Store ID Name", options=SHOPS_LIST, key="shop_rename_select")
+            rename_to = st.text_input("Assign New Label Variant Name", value=shop_to_rename, key="rename_to_input").strip()
+            if st.button("Commit Shop Rename Operations", use_container_width=True):
+                if rename_to and rename_to != shop_to_rename:
+                    with get_conn() as conn:
+                        conn.execute("UPDATE registered_shops SET shop_name = ? WHERE shop_name = ?", (rename_to, shop_to_rename))
+                        conn.execute("UPDATE active_daily_orders SET shop_name = ? WHERE shop_name = ?", (rename_to, shop_to_rename))
+                        conn.execute("UPDATE unkeyed_buffer SET shop_name = ? WHERE shop_name = ?", (rename_to, shop_to_rename))
+                        conn.execute("UPDATE historical_archive SET shop_name = ? WHERE shop_name = ?", (rename_to, shop_to_rename))
+                        conn.execute("UPDATE shop_keywords SET shop_name = ? WHERE shop_name = ?", (rename_to, shop_to_rename))
+                    st.toast(f"Renamed '{shop_to_rename}' to '{rename_to}' across all ledgers safely!", icon="✅")
+                    st.rerun()
+                    
+        st.subheader("🔗 Link Shop Parse Keywords")
+        keyword_input = st.text_input("Statement Search Keyword (e.g., 'DACELY')", key="kw_input").strip().upper()
+        target_mapping_shop = st.selectbox("Assign to Verified Target Shop", options=SHOPS_LIST, key="kw_target_select")
+        if st.button("Save Keyword Connection Link", use_container_width=True):
+            if keyword_input and target_mapping_shop:
+                with get_conn() as conn:
+                    conn.execute("INSERT OR REPLACE INTO shop_keywords (keyword, shop_name) VALUES (?, ?)", (keyword_input, target_mapping_shop))
+                st.toast(f"Linked statement keyword '{keyword_input}' to store configuration '{target_mapping_shop}'!", icon="✅")
+                st.rerun()
+            else:
+                st.error("Keyword identifier parameter input missing.")
+
+        # Real-time keyword registry reference view
+        with get_conn() as conn:
+            kws_df = pd.read_sql_query("SELECT keyword, shop_name FROM shop_keywords ORDER BY shop_name", conn)
+        if not kws_df.empty:
+            st.caption("Active Statement Keyword Mapping Rules:")
+            st.dataframe(kws_df, use_container_width=True, hide_index=True)
 
 # ---------------------------------------------------------------------------
 # Core Data Fetching under Scope Segregation Constraints
@@ -283,7 +353,7 @@ def _snapshot_active() -> None:
 
 
 def _replace_active(df: pd.DataFrame) -> int:
-    """Updates target rows matching operational views without cross-shop contamination."""
+    """Overwrites the target table rows matching the operational view parameters."""
     clean = df.copy()
     if "order_no" not in clean.columns:
         return 0
@@ -327,7 +397,7 @@ with tab_ledger:
         "Tick the **🗑️** checkbox and hit **Delete Selected Orders** to clear entries instantly."
     )
 
-    # --- Hybrid Upload Engine with Append-Only Design Execution Matrix ---
+    # --- Hybrid Upload Engine with Intelligently Structured Defaults ---
     with st.expander("📤 Bulk Load Daily Dispatched Records (Excel / CSV)", expanded=False):
         st.caption(
             "If your file includes a shop name column, the engine processes it row-by-row. "
@@ -392,7 +462,10 @@ with tab_ledger:
         ])
     else:
         grid_seed = grid_seed[["date", "order_no", "shop_name", "goods_name", "qty", "selling_price"]]
-    grid_seed.insert(0, "_delete", False)
+        
+    # User Requested Feature: Select All Row Items Checkbox Control
+    select_all_ledger = st.checkbox("Select All Active Rows For Bulk Actions", value=False, key="select_all_ledger_checkbox")
+    grid_seed.insert(0, "_delete", select_all_ledger)
 
     edited = st.data_editor(
         grid_seed,
@@ -516,7 +589,7 @@ def run_reconciliation(file, settlement_period: str) -> dict:
         fine_df = pd.DataFrame(columns=["order_no", "fines"])
 
     # --- miscellaneous other deductions collection ---
-    od_name = find_sheet(sheets, ["Other Deductions", "otherdeductions", "other_ded_columns", "other_ded_conditions", "other_deductions"])
+    od_name = find_sheet(sheets, ["Other Deductions", "otherdeductions", "other_ded_columns", "other_deductions"])
     if od_name:
         od = sheets[od_name]
         c_o = find_column(od, ["Order SN", "order_sn", "order_no", "order"])
@@ -553,6 +626,7 @@ def run_reconciliation(file, settlement_period: str) -> dict:
             other = float(row["other_deductions"])
             net_payout = complete_amount - abs(commission) - abs(ds_fee) - abs(fines) - abs(other)
             
+            # Use dynamically configured matching schema definitions
             statement_shop = normalize_shop_name(row["shop_name"])
 
             if on in active_map:
@@ -649,7 +723,10 @@ with tab_buffer:
         st.success("🎉 Exception staging containers are clear for this selection view context range.")
     else:
         buffer_seed = buffer_df.copy()
-        buffer_seed.insert(0, "🗑️ Select", False)
+        
+        # User Requested Feature: Select All Exceptions Checkbox Control
+        select_all_buffer = st.checkbox("Select All Staged Anomalies For Removal", value=False, key="select_all_buffer_checkbox")
+        buffer_seed.insert(0, "🗑️ Select", select_all_buffer)
         
         edited_buffer = st.data_editor(
             buffer_seed,
@@ -666,7 +743,7 @@ with tab_buffer:
             }
         )
 
-        b_col1, b_col2, _ = st.columns([1.5, 1.5, 5])
+        b_col1, b_col2, b_col3 = st.columns([1.5, 1.5, 3])
         
         if b_col1.button("♻️ Rematch Staged Rows", type="primary", use_container_width=True):
             rematched = 0
@@ -701,61 +778,46 @@ with tab_buffer:
                     conn.execute("DELETE FROM active_daily_orders WHERE order_no = ?", (b["order_no"],))
                     conn.execute("DELETE FROM unkeyed_buffer WHERE order_no = ?", (b["order_no"],))
                     rematched += 1
-            st.toast(f"Re-mapped {rematched} elements to long-term storage successfully.", icon="♻️")
+            st.toast(f"Re-mapped {rematched} elements to long-term storage successfully.", icon="✅")
             st.rerun()
 
         if b_col2.button("🗑️ Delete Selected Exceptions", use_container_width=True):
             to_del_buf = edited_buffer[edited_buffer["🗑️ Select"].fillna(False)]
             if to_del_buf.empty:
-                st.toast("No staged exceptions selected for erasure.", icon="ℹ️")
+                st.toast("No exception buffer profiles selected.", icon="ℹ️")
             else:
                 buf_ids = [str(x) for x in to_del_buf["order_no"].tolist() if x]
                 with get_conn() as conn:
                     conn.executemany("DELETE FROM unkeyed_buffer WHERE order_no = ?", [(bi,) for bi in buf_ids])
-                st.toast(f"Purged {len(buf_ids)} data anomalies from the staging buffer.", icon="🗑️")
+                st.toast(f"Purged {len(buf_ids)} anomalies from the buffer container tracking metrics.", icon="🗑️")
                 st.rerun()
 
 # ---------------------------------------------------------------------------
-# MODULE E — Permanent Historical Archive & BI Report Exporter
+# MODULE E — Permanent Historical Archive Panel
 # ---------------------------------------------------------------------------
 with tab_archive:
-    st.subheader("📚 Reconciled Sales Archive & Ledger Logs")
-    st.caption("Review permanently matched sales, calculated fee parameters, and true net payouts.")
-
+    st.subheader("📚 Permanent Ledger Verification Archive Matrix")
+    st.caption("Review permanently matched historical transactions, accurate payouts, and structured deductions.")
+    
     if archive_df.empty:
-        st.info("No matching historical records found for the selected storefront scope.")
+        st.info("No matching finalized archive data rows discovered within this selection profile context.")
     else:
-        # Format columns for crisp grid representation
-        display_archive = archive_df.copy()
-        
         st.dataframe(
-            display_archive.drop(columns=["archived_at"], errors="ignore"),
+            archive_df.drop(columns=["archived_at"], errors="ignore"),
             use_container_width=True,
             hide_index=True,
             column_config={
-                "order_no": st.column_config.TextColumn("Order ID"),
-                "shop_name": st.column_config.TextColumn("Store Entity Name"),
-                "goods_name": st.column_config.TextColumn("Product Nomenclature"),
-                "qty": st.column_config.NumberColumn("Units"),
-                "selling_price": st.column_config.NumberColumn("Original Price", format="%.2f"),
+                "order_no": st.column_config.TextColumn("Order Number"),
+                "shop_name": st.column_config.TextColumn("Store Identification"),
+                "goods_name": st.column_config.TextColumn("Product SKU Nomenclature"),
+                "qty": st.column_config.NumberColumn("Quantity"),
+                "selling_price": st.column_config.NumberColumn("Sales Book Price", format="%.2f"),
                 "settlement_period": st.column_config.TextColumn("Settlement Window"),
-                "complete_amount": st.column_config.NumberColumn("Gross Received", format="%.2f"),
-                "commission": st.column_config.NumberColumn("Kilimall Comm.", format="%.2f"),
-                "ds_processing_fee": st.column_config.NumberColumn("DS Processing", format="%.2f"),
-                "fines": st.column_config.NumberColumn("Fines Accrued", format="%.2f"),
-                "other_deductions": st.column_config.NumberColumn("Misc. Deductions", format="%.2f"),
-                "net_payout": st.column_config.NumberColumn("True Net Revenue", format="%.2f"),
+                "complete_amount": st.column_config.NumberColumn("Gross Dispatched", format="%.2f"),
+                "commission": st.column_config.NumberColumn("Platform Commissions", format="%.2f"),
+                "ds_processing_fee": st.column_config.NumberColumn("DS Fulfillment Cost", format="%.2f"),
+                "fines": st.column_config.NumberColumn("Penalties Applied", format="%.2f"),
+                "other_deductions": st.column_config.NumberColumn("Misc Deductions", format="%.2f"),
+                "net_payout": st.column_config.NumberColumn("Net Payout Disbursed", format="%.2f")
             }
-        )
-
-        # In-Memory Binary File Exporter Block
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            display_archive.to_excel(writer, index=False, sheet_name='Reconciled Financial Archive')
-        
-        st.download_button(
-            label="📥 Download Cleaned Financial Report (Excel)",
-            data=buffer.getvalue(),
-            file_name=f"Reconciled_Archive_{selected_shop.replace(' ', '_')}_{date.today().isoformat()}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
