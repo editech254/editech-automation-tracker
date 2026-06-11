@@ -4,7 +4,7 @@ EDITECH DIGITAL — Kilimall Order Lifecycle, Reconciliation & BI Software
 A state-driven Streamlit application backed by SQLite for managing the
 full Kilimall order lifecycle: daily order capture, weekly settlement
 reconciliation, exception handling, and lifetime business intelligence.
-Now features full Code-Free UI Dynamic Shop Management.
+Features Code-Free UI Shop Management and Master Select-All Tables.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ def init_db() -> None:
     with get_conn() as conn:
         c = conn.cursor()
         
-        # 1. New dynamic table to store shops via the UI
+        # 1. Dynamic table to store shops via the UI
         c.execute(
             """
             CREATE TABLE IF NOT EXISTS managed_shops (
@@ -147,7 +147,6 @@ init_db()
 # Dynamic Shop Fetchers & Data Normalization
 # ---------------------------------------------------------------------------
 def get_dynamic_shops() -> list[str]:
-    """Fetch the latest live list of verified shops from the database."""
     with get_conn() as conn:
         rows = conn.execute("SELECT shop_name FROM managed_shops ORDER BY shop_name").fetchall()
         return [r["shop_name"] for r in rows]
@@ -170,7 +169,6 @@ def clean_order_series(series: pd.Series) -> pd.Series:
 
 
 def normalize_shop_name(val) -> str:
-    """Intelligently matches uploads to UI-defined stores using database rules."""
     shops = get_dynamic_shops()
     if not shops:
         return "EDITECH DIGITAL"
@@ -180,11 +178,9 @@ def normalize_shop_name(val) -> str:
         
     s = str(val).strip().upper()
     
-    # Read rules directly from database records
     with get_conn() as conn:
         rules = conn.execute("SELECT shop_name, aliases FROM managed_shops").fetchall()
         
-    # Phase 1: Check full string or alias token hits
     for r in rules:
         name = r["shop_name"].upper()
         if s == name or name in s or s in name:
@@ -196,7 +192,7 @@ def normalize_shop_name(val) -> str:
                 if alias in s:
                     return r["shop_name"]
                     
-    return shops[0]  # System fallback to first alphabetical store entry
+    return shops[0]
 
 
 def to_float(v) -> float:
@@ -245,13 +241,12 @@ with st.sidebar:
     st.header("🏪 Global Shop Control")
     st.caption("Select a shop view to filter statistics and look up localized ledgers across tables.")
     
-    # Load live shop dropdown list dynamically
     live_shops = get_dynamic_shops()
     selected_shop = st.selectbox(
         "🎯 Filter Views by Shop Name",
         options=["All Shops"] + live_shops,
         index=0,
-        help="Filters the business scorecard and active ledger displays. Data imports maintain individual row attributions."
+        help="Filters the business scorecard and active ledger displays."
     )
 
 # ---------------------------------------------------------------------------
@@ -299,7 +294,7 @@ tab_ledger, tab_recon, tab_buffer, tab_archive, tab_settings = st.tabs(
         "🔄 Reconcile Settlement Report",
         f"⚠️ Un-keyed Exceptions Buffer ({len(buffer_df)})",
         f"📚 Permanent Historical Archive ({len(archive_df)})",
-        "⚙️ Storefront & Shop Settings"  # New Code-Free Settings Tab
+        "⚙️ Storefront & Shop Settings"
     ]
 )
 
@@ -357,12 +352,9 @@ with tab_ledger:
     if not live_shops:
         st.error("No registered stores found. Please define at least one storefront entry under the Settings tab.")
     else:
-        # --- Hybrid Upload Engine with Intelligently Structured Defaults ---
         with st.expander("📤 Bulk Load Daily Dispatched Records (Excel / CSV)", expanded=False):
             up_col1, up_col2, up_col3 = st.columns([2, 1, 1])
-            upload_file = up_col1.file_uploader(
-                "Upload orders file", type=["xlsx", "xls", "csv"], label_visibility="collapsed", key="orders_upload"
-            )
+            upload_file = up_col1.file_uploader("Upload orders file", type=["xlsx", "xls", "csv"], label_visibility="collapsed", key="orders_upload")
             default_upload_shop = up_col2.selectbox("Fallback Shop Target Assignment", options=live_shops)
             clear_range_mode = up_col3.checkbox("Clear Current Filter View Before Saving", value=False)
 
@@ -394,7 +386,6 @@ with tab_ledger:
                         norm = norm[norm["order_no"].astype(bool)]
 
                         _snapshot_active()
-                        
                         full_current = read_table("SELECT date, order_no, shop_name, goods_name, qty, selling_price FROM active_daily_orders")
                         if clear_range_mode:
                             if selected_shop == "All Shops":
@@ -411,7 +402,9 @@ with tab_ledger:
                 except Exception as exc:
                     st.error(f"Bulk data processing execution failed: {exc}")
 
-        # --- Live Ledger Editor Grid Frame Interface ---
+        # --- 🔳 MASTER SELECT ALL CHECKBOX FOR LEDGER ---
+        select_all_ledger = st.checkbox("☑️ Select All Rows on This Screen (Daily Ledger)", value=False, key="select_all_ledger_widget")
+
         grid_seed = active_df.copy()
         if grid_seed.empty:
             grid_seed = pd.DataFrame([
@@ -426,7 +419,9 @@ with tab_ledger:
             ])
         else:
             grid_seed = grid_seed[["date", "order_no", "shop_name", "goods_name", "qty", "selling_price"]]
-        grid_seed.insert(0, "_delete", False)
+        
+        # Injects the master check box value as default state for the rows
+        grid_seed.insert(0, "_delete", select_all_ledger)
 
         edited = st.data_editor(
             grid_seed,
@@ -434,7 +429,7 @@ with tab_ledger:
             num_rows="dynamic",
             use_container_width=True,
             column_config={
-                "_delete": st.column_config.CheckboxColumn("🗑️", help="Select row elements for deletion commands", default=False),
+                "_delete": st.column_config.CheckboxColumn("🗑️", help="Select row elements for deletion commands"),
                 "date": st.column_config.TextColumn("Date Capture (YYYY-MM-DD)"),
                 "order_no": st.column_config.TextColumn("Order No. (Unique)", required=True),
                 "shop_name": st.column_config.SelectboxColumn("Shop Designation Column", options=live_shops, required=True),
@@ -451,7 +446,6 @@ with tab_ledger:
             try:
                 _snapshot_active()
                 keep = edited[~edited["_delete"].fillna(False)].drop(columns=["_delete"])
-                
                 full_current = read_table("SELECT date, order_no, shop_name, goods_name, qty, selling_price FROM active_daily_orders")
                 if selected_shop == "All Shops":
                     merged = keep
@@ -652,8 +646,11 @@ with tab_buffer:
     if buffer_df.empty:
         st.success("🎉 Exception staging containers are clear for this selection view context range.")
     else:
+        # --- 🔳 MASTER SELECT ALL CHECKBOX FOR EXCEPTIONS ---
+        select_all_buffer = st.checkbox("☑️ Select All Rows on This Screen (Exceptions)", value=False, key="select_all_buffer_widget")
+
         buffer_seed = buffer_df.copy()
-        buffer_seed.insert(0, "🗑️ Select", False)
+        buffer_seed.insert(0, "🗑️ Select", select_all_buffer)
         
         edited_buffer = st.data_editor(
             buffer_seed, key="buffer_deletion_editor", use_container_width=True, hide_index=True,
@@ -709,8 +706,11 @@ with tab_archive:
     if archive_df.empty:
         st.info("No compiled settlement matrices recorded inside history metrics yet.")
     else:
+        # --- 🔳 MASTER SELECT ALL CHECKBOX FOR ARCHIVE ---
+        select_all_archive = st.checkbox("☑️ Select All Rows on This Screen (Archive Logs)", value=False, key="select_all_archive_widget")
+
         archive_seed = archive_df.copy()
-        archive_seed.insert(0, "🗑️ Select", False)
+        archive_seed.insert(0, "🗑️ Select", select_all_archive)
         
         edited_archive = st.data_editor(
             archive_seed, key="archive_deletion_editor", use_container_width=True, hide_index=True,
@@ -732,20 +732,19 @@ with tab_archive:
                 st.rerun()
 
 # ---------------------------------------------------------------------------
-# MODULE F — CODE-FREE STOREFRONT MANAGEMENT SETTINGS TAB
+# MODULE F — Storefront Management Settings Tab
 # ---------------------------------------------------------------------------
 with tab_settings:
     st.subheader("⚙️ Storefront & Shop Management Panel")
     st.caption("Add, remove, or fix typos in your shop lists without changing code. Changes deploy instantly.")
     
-    # 1. Layout splitting form and current items
     set_col1, set_col2 = st.columns([1, 1.5])
     
     with set_col1:
         st.markdown("### ➕ Register New Storefront")
         with st.form("add_shop_form", clear_on_submit=True):
-            new_shop_input = st.text_input("Official Shop Name (e.g., EDITECH GLOBAL)", help="Use clear unique system names.")
-            new_aliases_input = st.text_input("Keywords / Upload Search Aliases (Comma-separated)", help="Example: EDITECH, EDIT, DIGI")
+            new_shop_input = st.text_input("Official Shop Name (e.g., EDITECH DIGITAL)")
+            new_aliases_input = st.text_input("Keywords / Upload Search Aliases (Comma-separated)")
             submit_shop = st.form_submit_button("💾 Save New Store", type="primary")
             
             if submit_shop:
@@ -772,7 +771,7 @@ with tab_settings:
             use_container_width=True,
             hide_index=True,
             column_config={
-                "🗑️ Delete": st.column_config.CheckboxColumn("🗑️", help="Permanently drop this shop profile"),
+                "🗑️ Delete": st.column_config.CheckboxColumn("🗑️"),
                 "id": st.column_config.TextColumn("System Key ID", disabled=True),
                 "shop_name": st.column_config.TextColumn("Shop Name Designation", required=True),
                 "aliases": st.column_config.TextColumn("Parsing Search Aliases Tokens"),
@@ -781,28 +780,22 @@ with tab_settings:
         
         if st.button("Apply Settings Adjustments & Migrations", type="secondary"):
             with get_conn() as conn:
-                # Loop through changes to apply renaming updates or deletions
                 for _, row in edited_shops.iterrows():
                     orig_row = [r for r in shops_data.to_dict('records') if r['id'] == row['id']][0]
                     old_name = orig_row['shop_name']
                     new_name = str(row['shop_name']).strip().upper()
                     new_aliases = str(row['aliases'] or '').strip()
                     
-                    # Handle complete storefront absolute removal
                     if row["🗑️ Delete"]:
                         conn.execute("DELETE FROM managed_shops WHERE id = ?", (row["id"],))
-                        st.toast(f"Removed storefront mapping configuration container for '{old_name}'", icon="🗑️")
                         continue
                     
-                    # Handle renaming migration logic across ALL relational sheets automatically
                     if old_name != new_name:
                         conn.execute("UPDATE managed_shops SET shop_name = ?, aliases = ? WHERE id = ?", (new_name, new_aliases, row["id"]))
                         conn.execute("UPDATE active_daily_orders SET shop_name = ? WHERE shop_name = ?", (new_name, old_name))
                         conn.execute("UPDATE unkeyed_buffer SET shop_name = ? WHERE shop_name = ?", (new_name, old_name))
                         conn.execute("UPDATE historical_archive SET shop_name = ? WHERE shop_name = ?", (new_name, old_name))
-                        st.success(f"Migrated data tables: Changed '{old_name}' to '{new_name}' safely.")
                     else:
-                        # Simple alias string update
                         conn.execute("UPDATE managed_shops SET aliases = ? WHERE id = ?", (new_aliases, row["id"]))
             st.rerun()
 
