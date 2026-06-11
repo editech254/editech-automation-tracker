@@ -392,9 +392,10 @@ with tabs[3]:
     st.header("🔍 Search & Filter")
 
     q = st.text_input("Search text (order_no, product, shop)")
-    shops = st.multiselect("Shop", distinct_values("shop_name"))
-    statuses = st.multiselect("Status", distinct_values("status"))
-    sources = st.multiselect("Source", distinct_values("source"))
+    shops = st.multiselect("Shop", distinct_values("shop_name"), key="search_shop")
+    statuses = st.multiselect("Status", distinct_values("status"), key="search_status")
+    sources = st.multiselect("Source", distinct_values("source"), key="search_source")
+
 
     c1, c2 = st.columns(2)
     date_from = c1.date_input("From", value=None)
@@ -508,9 +509,10 @@ with tabs[6]:
     st.warning("⚠️ Destructive actions are logged and cannot be undone. Always preview first.")
 
     st.subheader("Guided Filters")
-    del_sources = st.multiselect("Source", distinct_values("source"))
-    del_shops = st.multiselect("Shop", distinct_values("shop_name"))
-    del_statuses = st.multiselect("Status", distinct_values("status"))
+    del_sources = st.multiselect("Source", distinct_values("source"), key="del_source")
+    del_shops = st.multiselect("Shop", distinct_values("shop_name"), key="del_shop")
+    del_statuses = st.multiselect("Status", distinct_values("status"), key="del_status")
+
 
     c1, c2 = st.columns(2)
     del_from = c1.date_input("Created from", value=None, key="del_from")
