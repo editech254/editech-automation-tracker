@@ -2,11 +2,11 @@ FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    DB_DIR=/app/data
 
 WORKDIR /app
 
-# System deps (small set, helpful for pandas/openpyxl)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential curl \
     && rm -rf /var/lib/apt/lists/*
@@ -16,9 +16,7 @@ RUN pip install -r requirements.txt
 
 COPY . .
 
-# Persistent DB directory (mount a volume here in Coolify)
-RUN mkdir -p /data
-ENV DB_DIR=/data
+RUN mkdir -p /app/data
 
 EXPOSE 8501
 

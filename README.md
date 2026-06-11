@@ -1,6 +1,24 @@
-# EDITECH Automation Tracker
+# Kilimall Reconciliation Suite — EDITECH DIGITAL
 
-Streamlit + SQLite app for tracking Kilimall orders. Deployable on Coolify via Docker Compose.
+A state-driven Streamlit + SQLite application for managing the complete
+Kilimall order lifecycle: daily order capture, weekly multi-sheet
+settlement reconciliation, exception handling, and lifetime BI metrics.
+
+## Modules
+
+| Module | Purpose |
+|--------|---------|
+| **A — Scorecard** | Live KPIs: Total Sold, Net Paid, Fees, Pending. |
+| **B — Daily Ledger** | Editable grid (`st.data_editor`) for daily dispatched orders. Paste from Excel, add/delete rows, commit. |
+| **C — Reconciliation Engine** | Drop the weekly multi-sheet Kilimall settlement `.xlsx`. Auto-cleans order IDs (strips quotes/commas), aggregates `bill details`, `ds processing fee`, `fine`, `Other Deductions`, computes `net_payout`, and archives matched orders. |
+| **D — Un-keyed Buffer** | Orders found on Kilimall settlement but missing from daily ledger. Key them in, then click **Rematch Buffer**. |
+| **E — Lifetime Archive** | All settled orders with CSV/Excel export. |
+
+## Database
+
+SQLite at `/app/data/reconciliation.db` (override with `DB_DIR` env var).
+
+Three persistent tables: `active_daily_orders`, `unkeyed_buffer`, `historical_archive`.
 
 ## Local run
 
@@ -9,27 +27,39 @@ cd streamlit-app
 docker compose up --build
 ```
 
-Then open http://localhost:8501
+Open <http://localhost:8501>.
 
 ## Coolify deployment
 
-1. In Coolify, create a new **Docker Compose** resource.
-2. Point it to this repo (or paste the `docker-compose.yml`).
-3. Coolify will build the image from the `Dockerfile`.
-4. Expose port `8501` (Coolify will provide a public URL + SSL).
-5. The named volume `editech_data` persists the SQLite DB at `/data/kilimall_automation.db` across redeploys.
+1. Push this folder to a Git repository (GitHub/GitLab).
+2. In Coolify → **New Resource → Docker Compose**.
+3. Connect your repo and point the build context to the folder containing `docker-compose.yml`.
+4. Coolify auto-builds from `Dockerfile`. Expose port `8501` — Coolify provides a public URL and SSL.
+5. The named volume `kilimall_data` persists the SQLite DB across redeploys.
 
-## Features
+### Environment variables
 
-- Upload Kilimall **CSV / Excel** exports (multiple files at once).
-- Auto-detects common column names (order_no, shop, product, qty, amount, status, etc.).
-- Cleans order numbers (strips non-digits) and de-duplicates by `order_no`.
-- View master orders table with CSV / Excel download.
-- Stats dashboard: totals, orders per shop, amount per status.
-- Danger zone: wipe all records.
+| Var | Default | Purpose |
+|-----|---------|---------|
+| `DB_DIR` | `/app/data` | Where `reconciliation.db` lives. Must be a mounted volume. |
 
-## Environment variables
+## Expected Kilimall settlement workbook
 
-| Var      | Default  | Purpose                                  |
-|----------|----------|------------------------------------------|
-| `DB_DIR` | `/data`  | Directory where `kilimall_automation.db` is stored. Mount a volume here. |
+Sheet names (case-insensitive, spaces flexible):
+
+- **`bill details`** — `order_sn`, `complete amount`, `Commission`, `settlement`
+- **`ds processing fee`** — `order_no`, `amout`
+- **`fine`** — `order_sn`, `fine(KSH)`
+- **`Other Deductions`** — `Order SN`, `Amount（ksh）`
+
+Missing optional sheets/columns generate a `st.toast` warning instead of crashing.
+
+## Net payout formula
+
+```
+net_payout = complete_amount
+           - |commission|
+           - |ds_processing_fee|
+           - |fines|
+           - |other_deductions|
+```

@@ -5,5 +5,8 @@ __pycache__
 venv
 .env
 *.db
+data/
 .git
+.gitignore
 .DS_Store
+README.md
