@@ -213,13 +213,100 @@ tab_ledger, tab_recon, tab_buffer, tab_archive = st.tabs(
 # ---------------------------------------------------------------------------
 # MODULE B — Interactive Grid Ledger
 # ---------------------------------------------------------------------------
+def _snapshot_active() -> None:
+    """Push current active_daily_orders to undo stack (keeps last 10)."""
+    snap = read_table("SELECT date, order_no, goods_name, qty, selling_price FROM active_daily_orders")
+    stack = st.session_state.setdefault("undo_stack", [])
+    stack.append(snap)
+    if len(stack) > 10:
+        stack.pop(0)
+
+
+def _replace_active(df: pd.DataFrame) -> int:
+    """Atomically replace active_daily_orders with df. Returns rows written."""
+    clean = df.copy()
+    if "order_no" not in clean.columns:
+        return 0
+    clean["order_no"] = clean_order_series(clean["order_no"])
+    clean = clean[clean["order_no"].astype(bool)]
+    clean = clean.drop_duplicates(subset=["order_no"], keep="last")
+    rows = [
+        (
+            str(r.get("date") or date.today().isoformat()),
+            str(r["order_no"]),
+            str(r.get("goods_name") or ""),
+            int(r["qty"]) if pd.notna(r.get("qty")) else 0,
+            float(r["selling_price"]) if pd.notna(r.get("selling_price")) else 0.0,
+        )
+        for _, r in clean.iterrows()
+    ]
+    with get_conn() as conn:
+        conn.execute("DELETE FROM active_daily_orders")
+        conn.executemany(
+            "INSERT INTO active_daily_orders (date, order_no, goods_name, qty, selling_price) VALUES (?,?,?,?,?)",
+            rows,
+        )
+    return len(rows)
+
+
 with tab_ledger:
-    st.subheader("📝 Active Daily Orders — Interactive Grid")
+    st.subheader("📝 Active Daily Orders")
     st.caption(
-        "Paste rows directly from Excel, click **+** to add, or delete rows. "
-        "Hit **Commit Grid Changes** to persist."
+        "Upload an Excel/CSV of daily orders, or edit the grid directly. "
+        "Tick the **Delete** box on any row and hit **Delete Selected**. "
+        "**Undo** reverts the last change."
     )
 
+    # --- Upload daily orders ----------------------------------------------
+    with st.expander("📤 Upload Daily Orders (Excel / CSV)", expanded=False):
+        st.caption(
+            "We auto-detect columns: **date, order_no, goods_name, qty, selling_price** "
+            "(case/space insensitive). Uploaded rows are *merged* with existing — "
+            "duplicates by order_no are overwritten."
+        )
+        up_col1, up_col2 = st.columns([3, 1])
+        upload_file = up_col1.file_uploader(
+            "Orders file", type=["xlsx", "xls", "csv"], label_visibility="collapsed", key="orders_upload"
+        )
+        replace_mode = up_col2.checkbox("Replace all", value=False, help="If checked, wipes existing orders first.")
+
+        if upload_file and st.button("⬆️ Import Orders", type="primary"):
+            try:
+                if upload_file.name.lower().endswith(".csv"):
+                    udf = pd.read_csv(upload_file, dtype=str)
+                else:
+                    udf = pd.read_excel(upload_file, dtype=str)
+
+                c_date = find_column(udf, ["date", "order_date", "created_at"])
+                c_ord = find_column(udf, ["order_no", "order_sn", "order", "order number", "order_id"])
+                c_goods = find_column(udf, ["goods_name", "product", "product_name", "item", "goods"])
+                c_qty = find_column(udf, ["qty", "quantity", "qnty"])
+                c_price = find_column(udf, ["selling_price", "price", "amount", "selling price"])
+
+                if not c_ord:
+                    st.error("Could not find an order number column in the file.")
+                else:
+                    norm = pd.DataFrame({
+                        "date": udf[c_date] if c_date else date.today().isoformat(),
+                        "order_no": clean_order_series(udf[c_ord]),
+                        "goods_name": udf[c_goods] if c_goods else "",
+                        "qty": udf[c_qty].map(lambda v: int(to_float(v))) if c_qty else 1,
+                        "selling_price": udf[c_price].map(to_float) if c_price else 0.0,
+                    })
+                    norm = norm[norm["order_no"].astype(bool)]
+
+                    _snapshot_active()
+                    if replace_mode:
+                        merged = norm
+                    else:
+                        merged = pd.concat([active_df[["date", "order_no", "goods_name", "qty", "selling_price"]], norm], ignore_index=True)
+                    n = _replace_active(merged)
+                    st.toast(f"Imported {len(norm)} rows · total now {n}.", icon="✅")
+                    st.rerun()
+            except Exception as exc:
+                st.error(f"Import failed: {exc}")
+
+    # --- Editable grid with Delete checkbox -------------------------------
     grid_seed = active_df.copy()
     if grid_seed.empty:
         grid_seed = pd.DataFrame(
@@ -227,6 +314,7 @@ with tab_ledger:
         )
     else:
         grid_seed = grid_seed[["date", "order_no", "goods_name", "qty", "selling_price"]]
+    grid_seed.insert(0, "_delete", False)
 
     edited = st.data_editor(
         grid_seed,
@@ -234,6 +322,7 @@ with tab_ledger:
         num_rows="dynamic",
         use_container_width=True,
         column_config={
+            "_delete": st.column_config.CheckboxColumn("🗑️", help="Tick rows to delete, then click Delete Selected", default=False),
             "date": st.column_config.TextColumn("Date", help="YYYY-MM-DD"),
             "order_no": st.column_config.TextColumn("Order No.", required=True),
             "goods_name": st.column_config.TextColumn("Goods Name"),
@@ -242,35 +331,36 @@ with tab_ledger:
         },
     )
 
-    col_a, col_b = st.columns([1, 5])
-    if col_a.button("💾 Commit Grid Changes", type="primary", use_container_width=True):
-        try:
-            clean = edited.copy()
-            clean["order_no"] = clean_order_series(clean["order_no"])
-            clean = clean[clean["order_no"].astype(bool)]
-            clean = clean.drop_duplicates(subset=["order_no"], keep="last")
+    undo_stack = st.session_state.get("undo_stack", [])
+    col_a, col_b, col_c, col_d = st.columns([1.4, 1.4, 1, 3])
 
-            with get_conn() as conn:
-                # Replace-in-place: delete existing active rows, then insert current grid.
-                conn.execute("DELETE FROM active_daily_orders")
-                rows = [
-                    (
-                        str(r.get("date") or date.today().isoformat()),
-                        str(r["order_no"]),
-                        str(r.get("goods_name") or ""),
-                        int(r["qty"]) if pd.notna(r.get("qty")) else 0,
-                        float(r["selling_price"]) if pd.notna(r.get("selling_price")) else 0.0,
-                    )
-                    for _, r in clean.iterrows()
-                ]
-                conn.executemany(
-                    "INSERT INTO active_daily_orders (date, order_no, goods_name, qty, selling_price) VALUES (?,?,?,?,?)",
-                    rows,
-                )
-            st.toast(f"Saved {len(rows)} active orders.", icon="✅")
+    if col_a.button("💾 Commit Changes", type="primary", use_container_width=True):
+        try:
+            _snapshot_active()
+            keep = edited[~edited["_delete"].fillna(False)].drop(columns=["_delete"])
+            n = _replace_active(keep)
+            st.toast(f"Saved {n} active orders.", icon="✅")
             st.rerun()
         except Exception as exc:
             st.error(f"Failed to commit grid: {exc}")
+
+    if col_b.button("🗑️ Delete Selected", use_container_width=True):
+        to_del = edited[edited["_delete"].fillna(False)]
+        if to_del.empty:
+            st.toast("No rows ticked for deletion.", icon="ℹ️")
+        else:
+            _snapshot_active()
+            ids = [clean_order_no(x) for x in to_del["order_no"].tolist() if clean_order_no(x)]
+            with get_conn() as conn:
+                conn.executemany("DELETE FROM active_daily_orders WHERE order_no = ?", [(i,) for i in ids])
+            st.toast(f"Deleted {len(ids)} row(s).", icon="🗑️")
+            st.rerun()
+
+    if col_c.button(f"↩️ Undo ({len(undo_stack)})", use_container_width=True, disabled=not undo_stack):
+        prev = st.session_state["undo_stack"].pop()
+        _replace_active(prev)
+        st.toast("Reverted last change.", icon="↩️")
+        st.rerun()
 
 # ---------------------------------------------------------------------------
 # MODULE C — Multi-sheet Reconciliation Engine
