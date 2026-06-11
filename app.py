@@ -230,14 +230,13 @@ with st.sidebar:
     st.header("🏪 Global Shop Control")
     st.caption("Select a shop view to filter statistics and look up localized ledgers across tables.")
     
-    # Core dynamic store layout configuration sync
     SHOPS_LIST = load_shops_list()
     
     selected_shop = st.selectbox(
         "🎯 Filter Views by Shop Name",
         options=["All Shops"] + SHOPS_LIST,
         index=0,
-        help="Filters the business scorecard and active ledger displays. Data imports maintain individual row attributions."
+        help="Filters the business scorecard and active ledger displays."
     )
     
     st.divider()
@@ -285,7 +284,6 @@ with st.sidebar:
             else:
                 st.error("Keyword identifier parameter input missing.")
 
-        # Real-time keyword registry reference view
         with get_conn() as conn:
             kws_df = pd.read_sql_query("SELECT keyword, shop_name FROM shop_keywords ORDER BY shop_name", conn)
         if not kws_df.empty:
@@ -293,7 +291,7 @@ with st.sidebar:
             st.dataframe(kws_df, use_container_width=True, hide_index=True)
 
 # ---------------------------------------------------------------------------
-# Core Data Fetching under Scope Segregation Constraints
+# Core Data Fetching
 # ---------------------------------------------------------------------------
 if selected_shop == "All Shops":
     active_df = read_table("SELECT * FROM active_daily_orders ORDER BY date DESC")
@@ -329,7 +327,7 @@ m4.metric(f"⏳ Pending Payment Balance", ksh(pending_payment), f"{len(active_df
 st.divider()
 
 # ---------------------------------------------------------------------------
-# Core Workspaces Tabs Layout Configuration
+# Workspaces Tabs
 # ---------------------------------------------------------------------------
 tab_ledger, tab_recon, tab_buffer, tab_archive = st.tabs(
     [
@@ -341,10 +339,9 @@ tab_ledger, tab_recon, tab_buffer, tab_archive = st.tabs(
 )
 
 # ---------------------------------------------------------------------------
-# MODULE B — Interactive Grid Ledger (Daily Logs Workspace)
+# MODULE B — Daily Ledger Workspace
 # ---------------------------------------------------------------------------
 def _snapshot_active() -> None:
-    """Saves the current state of the active database table to the session undo stack."""
     snap = read_table("SELECT date, order_no, shop_name, goods_name, qty, selling_price FROM active_daily_orders")
     stack = st.session_state.setdefault("undo_stack", [])
     stack.append(snap)
@@ -353,7 +350,6 @@ def _snapshot_active() -> None:
 
 
 def _replace_active(df: pd.DataFrame) -> int:
-    """Overwrites the target table rows matching the operational view parameters."""
     clean = df.copy()
     if "order_no" not in clean.columns:
         return 0
@@ -393,16 +389,11 @@ def _replace_active(df: pd.DataFrame) -> int:
 with tab_ledger:
     st.subheader("📝 Active Dispatch Daily Ledger Logs")
     st.caption(
-        "Directly add or adjust entries below. The **Shop Name** field is restricted to verified storefront entities. "
-        "Tick the **🗑️** checkbox and hit **Delete Selected Orders** to clear entries instantly."
+        "Directly add or adjust entries below. "
+        "Tick the **🗑️** checkbox or use **Select All** above to clear entries instantly."
     )
 
-    # --- Hybrid Upload Engine with Intelligently Structured Defaults ---
     with st.expander("📤 Bulk Load Daily Dispatched Records (Excel / CSV)", expanded=False):
-        st.caption(
-            "If your file includes a shop name column, the engine processes it row-by-row. "
-            "If it does not exist, rows default to the fallback shop chosen below."
-        )
         up_col1, up_col2 = st.columns([3, 1])
         upload_file = up_col1.file_uploader(
             "Upload orders file", type=["xlsx", "xls", "csv"], label_visibility="collapsed", key="orders_upload"
@@ -447,7 +438,6 @@ with tab_ledger:
             except Exception as exc:
                 st.error(f"Bulk data processing execution failed: {exc}")
 
-    # --- Live Ledger Editor Grid Frame Interface ---
     grid_seed = active_df.copy()
     if grid_seed.empty:
         grid_seed = pd.DataFrame([
@@ -463,7 +453,7 @@ with tab_ledger:
     else:
         grid_seed = grid_seed[["date", "order_no", "shop_name", "goods_name", "qty", "selling_price"]]
         
-    # User Requested Feature: Select All Row Items Checkbox Control
+    # Select All Checkbox for Daily Ledger Table
     select_all_ledger = st.checkbox("Select All Active Rows For Bulk Actions", value=False, key="select_all_ledger_checkbox")
     grid_seed.insert(0, "_delete", select_all_ledger)
 
@@ -523,13 +513,12 @@ with tab_ledger:
         st.rerun()
 
 # ---------------------------------------------------------------------------
-# MODULE C — Multi-sheet Reconciliation Engine
+# MODULE C — Reconciliation Matching Engine
 # ---------------------------------------------------------------------------
 def run_reconciliation(file, settlement_period: str) -> dict:
     sheets = pd.read_excel(file, sheet_name=None, dtype=str)
     warnings: list[str] = []
 
-    # --- bill details tab processing ---
     bill_name = find_sheet(sheets, ["bill details", "billdetails", "bill_details", "bill detail"])
     if not bill_name:
         raise ValueError("Critical structural component missing: 'bill details' sheet wasn't discovered.")
@@ -558,7 +547,7 @@ def run_reconciliation(file, settlement_period: str) -> dict:
         {"complete_amount": "sum", "commission": "sum", "settlement_base": "sum", "shop_name": "first"}
     )
 
-    # --- ds processing fee sub-sheet data capture ---
+    # ds fee processing
     ds_name = find_sheet(sheets, ["ds processing fee", "dsprocessingfee", "ds_processing_fee"])
     if ds_name:
         ds = sheets[ds_name]
@@ -573,7 +562,7 @@ def run_reconciliation(file, settlement_period: str) -> dict:
     else:
         ds_df = pd.DataFrame(columns=["order_no", "ds_processing_fee"])
 
-    # --- fine deductions processing ---
+    # fine deductions processing
     fine_name = find_sheet(sheets, ["fine", "fines"])
     if fine_name:
         fn = sheets[fine_name]
@@ -583,12 +572,12 @@ def run_reconciliation(file, settlement_period: str) -> dict:
             fine_df = pd.DataFrame({"order_no": clean_order_series(fn[c_o]), "fines": fn[c_a].map(to_float)})
             fine_df = fine_df[fine_df["order_no"].astype(bool)].groupby("order_no", as_index=False).sum()
         else:
-            warnings.append("Sticker notice: 'fine' deduction tracking layout contains structural mutations.")
+            warnings.append("Fine column mismatch inside verification sheet structure.")
             fine_df = pd.DataFrame(columns=["order_no", "fines"])
     else:
         fine_df = pd.DataFrame(columns=["order_no", "fines"])
 
-    # --- miscellaneous other deductions collection ---
+    # miscellaneous deductions
     od_name = find_sheet(sheets, ["Other Deductions", "otherdeductions", "other_ded_columns", "other_deductions"])
     if od_name:
         od = sheets[od_name]
@@ -598,19 +587,18 @@ def run_reconciliation(file, settlement_period: str) -> dict:
             od_df = pd.DataFrame({"order_no": clean_order_series(od[c_o]), "other_deductions": od[c_a].map(to_float)})
             od_df = od_df[od_df["order_no"].astype(bool)].groupby("order_no", as_index=False).sum()
         else:
-            warnings.append("Sticker notice: 'Other Deductions' table configuration omitted from tracking calculations.")
+            warnings.append("Other deductions structural layout parsing variance detected.")
             od_df = pd.DataFrame(columns=["order_no", "other_deductions"])
     else:
         od_df = pd.DataFrame(columns=["order_no", "other_deductions"])
 
-    # --- Compiled Matrices Left Joining Pipeline ---
+    # Compiled Left Join
     master = bill_df.merge(ds_df, on="order_no", how="left")
     master = master.merge(fine_df, on="order_no", how="left")
     master = master.merge(od_df, on="order_no", how="left")
     for col in ["ds_processing_fee", "fines", "other_deductions", "commission"]:
         master[col] = master[col].fillna(0.0)
 
-    # --- Match execution loops against active inventory vectors ---
     active = read_table("SELECT * FROM active_daily_orders")
     active_map = {row["order_no"]: row for _, row in active.iterrows()}
 
@@ -626,7 +614,6 @@ def run_reconciliation(file, settlement_period: str) -> dict:
             other = float(row["other_deductions"])
             net_payout = complete_amount - abs(commission) - abs(ds_fee) - abs(fines) - abs(other)
             
-            # Use dynamically configured matching schema definitions
             statement_shop = normalize_shop_name(row["shop_name"])
 
             if on in active_map:
@@ -680,16 +667,10 @@ def run_reconciliation(file, settlement_period: str) -> dict:
 
 with tab_recon:
     st.subheader("🔄 Weekly Multi-Sheet Matching Engine")
-    st.caption(
-        "Ingest Kilimall's settlement spreadsheets here. The system splits payouts by shop automatically, "
-        "calculates true fee parameters, and archives reconciled logs dynamically."
-    )
+    st.caption("Ingest Kilimall's settlement spreadsheets here to split payouts and match lines seamlessly.")
 
     col1, col2 = st.columns([2, 1])
-    period = col1.text_input(
-        "Settlement Period Label Reference",
-        value=f"Week of {date.today().isoformat()}",
-    )
+    period = col1.text_input("Settlement Period Label Reference", value=f"Week of {date.today().isoformat()}")
     settlement_file = col2.file_uploader("Drop settlement sheet document here", type=["xlsx", "xls"], label_visibility="collapsed")
 
     if settlement_file and st.button("🚀 Run System Settlement Reconciliation", type="primary"):
@@ -700,7 +681,7 @@ with tab_recon:
                     st.toast(w, icon="⚠️")
                 st.success(
                     f"Processed {result['total']} settled items -> "
-                    f"✅ {result['matched']} matched & saved to archive storage, ⚠️ {result['unkeyed']} anomalies sent to staging exception views."
+                    f"✅ {result['matched']} matched & archived, ⚠️ {result['unkeyed']} anomalies sent to exception workspace buffer."
                 )
                 st.rerun()
             except ValueError as exc:
@@ -709,14 +690,14 @@ with tab_recon:
                 st.error(f"Unexpected operational failure encountered: {exc}")
 
 # ---------------------------------------------------------------------------
-# MODULE D — Un-keyed Buffer Exception Handler & Deletion Control
+# MODULE D — Un-keyed Buffer Exception Workspace (FIXED WITH DELETE & SELECT ALL)
 # ---------------------------------------------------------------------------
 with tab_buffer:
     st.subheader("⚠️ Missing Log Staging Exception Buffer Workspace")
     st.caption(
-        "Orders tracked below appeared in Kilimall's statements but were missing from your ledger logs. "
-        "Key them into the **Daily Ledger Workspace**, then press **Rematch Staged Rows** to resolve exceptions. "
-        "You can also check rows and click **Delete Selected Exceptions** to purge data anomalies immediately."
+        "Orders tracked below appeared in Kilimall's statements but were missing from your active ledger. "
+        "Key them into the daily ledger, then click **Rematch Staged Rows** to sync. "
+        "Alternatively, check rows or use **Select All** to remove data anomalies instantly."
     )
 
     if buffer_df.empty:
@@ -724,7 +705,7 @@ with tab_buffer:
     else:
         buffer_seed = buffer_df.copy()
         
-        # User Requested Feature: Select All Exceptions Checkbox Control
+        # Select All Checkbox for Exceptions Table
         select_all_buffer = st.checkbox("Select All Staged Anomalies For Removal", value=False, key="select_all_buffer_checkbox")
         buffer_seed.insert(0, "🗑️ Select", select_all_buffer)
         
@@ -750,9 +731,7 @@ with tab_buffer:
             with get_conn() as conn:
                 buf_rows = conn.execute("SELECT * FROM unkeyed_buffer").fetchall()
                 for b in buf_rows:
-                    a = conn.execute(
-                        "SELECT * FROM active_daily_orders WHERE order_no = ?", (b["order_no"],)
-                    ).fetchone()
+                    a = conn.execute("SELECT * FROM active_daily_orders WHERE order_no = ?", (b["order_no"],)).fetchone()
                     if not a:
                         continue
                     complete_amount = float(b["complete_amount"] or 0)
@@ -781,6 +760,7 @@ with tab_buffer:
             st.toast(f"Re-mapped {rematched} elements to long-term storage successfully.", icon="✅")
             st.rerun()
 
+        # Fixed: Functional Delete Engine connected right to SQLite for the Exception Buffer Workspace
         if b_col2.button("🗑️ Delete Selected Exceptions", use_container_width=True):
             to_del_buf = edited_buffer[edited_buffer["🗑️ Select"].fillna(False)]
             if to_del_buf.empty:
