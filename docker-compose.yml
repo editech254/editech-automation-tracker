@@ -1,5 +1,4 @@
 version: '3.8'
-
 services:
   db:
     image: 'postgres:16-alpine'
@@ -11,8 +10,6 @@ services:
       POSTGRES_DB: '${POSTGRES_DB:-editech_accounting}'
     volumes:
       - 'postgres_data:/var/lib/postgresql/data'
-    # Exposing 5432 to the host is optional in production; containers talk internally via the service name 'db'
-
   web:
     build:
       context: .
@@ -25,13 +22,10 @@ services:
       DATABASE_URL: 'postgresql://${POSTGRES_USER:-editech_admin}:${POSTGRES_PASSWORD:-SecurePass2026!}@db:5432/${POSTGRES_DB:-editech_accounting}'
     depends_on:
       - db
-    # --- COOLIFY ROUTING FIX LABELS START ---
     labels:
       - "coolify.managed=true"
       - "coolify.service.type=web"
-      - "coolify.port=8501"  # Tells Traefik proxy to route public domain queries here
-    # --- COOLIFY ROUTING FIX LABELS END ---
-
+      - "coolify.port=8501"
 volumes:
   postgres_data:
-    name: editech_postgres_prod_data  # Named volume persists database info across rebuilds
+    name: editech_postgres_prod_data
