@@ -1,21 +1,18 @@
 version: '3.8'
 
 services:
-  # Service 1: PostgreSQL Database Engine
   db:
-    image: postgres:16-alpine
+    image: 'postgres:16-alpine'
     container_name: editech_postgres_prod
     restart: always
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-editech_admin}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-SecurePass2026!}
-      POSTGRES_DB: ${POSTGRES_DB:-editech_accounting}
+      POSTGRES_USER: '${POSTGRES_USER:-editech_admin}'
+      POSTGRES_PASSWORD: '${POSTGRES_PASSWORD:-SecurePass2026!}'
+      POSTGRES_DB: '${POSTGRES_DB:-editech_accounting}'
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
+      - 'postgres_data:/var/lib/postgresql/data'
+    # Exposing 5432 to the host is optional in production; containers talk internally via the service name 'db'
 
-  # Service 2: Streamlit Web Application
   web:
     build:
       context: .
@@ -23,12 +20,18 @@ services:
     container_name: editech_streamlit_app
     restart: always
     ports:
-      - "8501:8501"
+      - '8501:8501'
     environment:
-      # We reference 'db' as the hostname because Docker Compose links them on the same network
-      DATABASE_URL: "postgresql://${POSTGRES_USER:-editech_admin}:${POSTGRES_PASSWORD:-SecurePass2026!}@db:5432/${POSTGRES_DB:-editech_accounting}"
+      DATABASE_URL: 'postgresql://${POSTGRES_USER:-editech_admin}:${POSTGRES_PASSWORD:-SecurePass2026!}@db:5432/${POSTGRES_DB:-editech_accounting}'
     depends_on:
       - db
+    # --- COOLIFY ROUTING FIX LABELS START ---
+    labels:
+      - "coolify.managed=true"
+      - "coolify.service.type=web"
+      - "coolify.port=8501"  # Tells Traefik proxy to route public domain queries here
+    # --- COOLIFY ROUTING FIX LABELS END ---
 
 volumes:
   postgres_data:
+    name: editech_postgres_prod_data  # Named volume persists database info across rebuilds
