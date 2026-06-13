@@ -1,0 +1,6 @@
+streamlit>=1.36
+pandas>=2.2
+plotly>=5.22
+psycopg2-binary>=2.9
+openpyxl>=3.1
+bcrypt>=4.1
